@@ -16,8 +16,25 @@ const formRoutes = require('./routes/forms');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+const defaultOrigins = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:4173',
+];
+const envOrigins = (process.env.CORS_ORIGINS || process.env.FRONTEND_URL || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+const allowedOrigins = [...new Set([...defaultOrigins, ...envOrigins])];
+
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:4173'],
+  origin(origin, callback) {
+    // Permitir herramientas sin Origin (curl, healthchecks, etc.)
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS bloqueado para origen: ${origin}`));
+  },
   credentials: true,
 }));
 
