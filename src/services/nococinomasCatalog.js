@@ -43,6 +43,7 @@ function parseProducts(html, category) {
     }
 
     products.push({
+      external_id: idMatch[1],
       external_url: externalUrl.split('?')[0],
       name: nameMatch[1].trim(),
       price: priceMatch ? parseFloat(priceMatch[1].replace(',', '.')) : null,
@@ -54,6 +55,98 @@ function parseProducts(html, category) {
   }
 
   return products;
+}
+
+function normalizeName(name) {
+  return String(name || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractIdFromUrl(url) {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url, BASE_URL);
+    const fromQuery = parsed.searchParams.get('id_product');
+    if (fromQuery) return fromQuery;
+  } catch {
+    // ignore
+  }
+  const match = String(url).match(/\/(\d+)-[^/?#]+/);
+  return match ? match[1] : null;
+}
+
+function extractIdFromHtml(html) {
+  const patterns = [
+    /name="id_product"\s+value="(\d+)"/i,
+    /data-id-product="(\d+)"/i,
+    /id_product["']?\s*[:=]\s*["']?(\d+)/i,
+  ];
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function pickProductByName(products, name) {
+  const want = normalizeName(name);
+  if (!want || products.length === 0) return null;
+  return products.find((p) => normalizeName(p.name) === want)
+    || products.find((p) => {
+      const got = normalizeName(p.name);
+      return got.includes(want) || want.includes(got);
+    })
+    || (products.length === 1 ? products[0] : null);
+}
+
+async function resolveOneProduct({ name, url }) {
+  const fromUrl = extractIdFromUrl(url);
+  if (fromUrl) {
+    return { name, url: url || null, productId: fromUrl };
+  }
+
+  if (url) {
+    try {
+      const html = await fetchHtml(url);
+      const id = extractIdFromHtml(html);
+      if (id) return { name, url, productId: id };
+    } catch {
+      // continuar con búsqueda por nombre
+    }
+  }
+
+  if (!name) return { name, url: url || null, productId: null };
+
+  try {
+    const searchUrl = `${BASE_URL}/busqueda?controller=search&s=${encodeURIComponent(name)}`;
+    const html = await fetchHtml(searchUrl);
+    const products = parseProducts(html, 'search');
+    const product = pickProductByName(products, name);
+    if (product?.external_id) {
+      return { name, url: product.external_url, productId: product.external_id };
+    }
+    const id = extractIdFromHtml(html);
+    if (id) return { name, url: product?.external_url || url || null, productId: id };
+  } catch {
+    // ignore
+  }
+
+  return { name, url: url || null, productId: null };
+}
+
+async function resolveProductIds(items) {
+  const resolved = [];
+  for (const item of items) {
+    resolved.push(await resolveOneProduct({
+      name: item.name,
+      url: item.url,
+    }));
+  }
+  return resolved;
 }
 
 async function discoverCategoryUrls() {
@@ -144,4 +237,4 @@ async function fetchAllDishes(onProgress) {
   return dishes;
 }
 
-module.exports = { fetchAllDishes };
+module.exports = { fetchAllDishes, resolveProductIds, extractIdFromUrl };

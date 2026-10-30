@@ -4,6 +4,7 @@ const foodController = require('../controllers/foodController');
 const { authMiddleware, adminMiddleware } = require('../middleware/auth');
 
 router.post('/catalog/sync', authMiddleware, adminMiddleware, foodController.syncCatalog);
+router.post('/resolve-ids', authMiddleware, adminMiddleware, foodController.resolveProductIds);
 router.get('/dishes', authMiddleware, foodController.getDishes);
 router.get('/orders/export', authMiddleware, adminMiddleware, foodController.exportOrdersCsv);
 router.get('/orders', authMiddleware, adminMiddleware, foodController.getAllOrders);
