@@ -1,5 +1,5 @@
 const supabase = require('../database');
-const { fetchAllDishes } = require('../services/nococinomasCatalog');
+const { fetchAllDishes, resolveProductIds } = require('../services/nococinomasCatalog');
 const {
   getEventById,
   assertFoodOrderingEnabled,
@@ -148,6 +148,29 @@ exports.syncCatalog = async (req, res) => {
     if (!res.headersSent) {
       res.status(status).json({ message });
     }
+  }
+};
+
+exports.resolveProductIds = async (req, res) => {
+  try {
+    const eventId = req.params.eventId;
+    const event = await getEventById(eventId);
+    if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
+
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    const cleaned = items
+      .filter((item) => item && (item.name || item.url))
+      .slice(0, 80)
+      .map((item) => ({
+        name: String(item.name || '').trim(),
+        url: String(item.url || '').trim(),
+      }));
+
+    const resolved = await resolveProductIds(cleaned);
+    res.json({ items: resolved });
+  } catch (error) {
+    console.error('Error al resolver IDs de NoCocinoMás:', error);
+    res.status(500).json({ message: 'Error al buscar los productos en NoCocinoMás' });
   }
 };
 
@@ -326,7 +349,7 @@ async function fetchAllOrdersForEvent(eventId) {
     .select(`
       id, day, meal, quantity, created_at,
       users ( id, username, nombre, apellidos, email ),
-      event_food_dishes ( id, name, price, category )
+      event_food_dishes ( id, name, price, category, image_url, external_url )
     `)
     .eq('event_id', eventId)
     .order('day')
