@@ -9,7 +9,25 @@ exports.getAllEvents = async (req, res) => {
       .order('mes', { ascending: true });
 
     if (error) throw error;
-    res.json({ events });
+
+    let stateByEvent = {};
+    if (req.user?.id) {
+      const { data: inscriptions } = await supabase
+        .from('inscriptions')
+        .select('event_id, inscription_states ( nombre )')
+        .eq('user_id', req.user.id);
+
+      stateByEvent = Object.fromEntries(
+        (inscriptions || []).map((row) => [row.event_id, row.inscription_states?.nombre || null]),
+      );
+    }
+
+    const withState = (events || []).map((event) => ({
+      ...event,
+      mi_estado: stateByEvent[event.id] || 'Sin inscribir',
+    }));
+
+    res.json({ events: withState });
   } catch (error) {
     console.error('Error al obtener eventos:', error);
     res.status(500).json({ message: 'Error interno del servidor' });
