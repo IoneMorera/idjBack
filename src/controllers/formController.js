@@ -1,4 +1,5 @@
 const supabase = require('../database');
+const { withoutInternalFormFields } = require('../utils/hotelPayment');
 
 // Obtener formulario completo de un evento (bloques + campos + opciones)
 exports.getEventForm = async (req, res) => {
@@ -21,7 +22,7 @@ exports.getEventForm = async (req, res) => {
 
     if (error) throw error;
 
-    res.json({ blocks: blocks || [] });
+    res.json({ blocks: withoutInternalFormFields(blocks) });
   } catch (error) {
     console.error('Error al obtener formulario:', error);
     res.status(500).json({ message: 'Error interno del servidor' });
