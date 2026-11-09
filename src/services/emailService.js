@@ -68,6 +68,103 @@ function createTransport(port, secure, ipv4) {
   });
 }
 
+function senderParts(user) {
+  const raw = fromAddress(user);
+  const match = raw.match(/^(?:"?([^"]*)"?\s*)?<([^>]+)>$/);
+  if (match) return { name: (match[1] || 'Ludo VyP').trim() || 'Ludo VyP', email: match[2].trim() };
+  if (raw.includes('@')) return { name: 'Ludo VyP', email: raw.trim() };
+  return { name: 'Ludo VyP', email: user };
+}
+
+function gmailConfigured() {
+  return Boolean(process.env.GMAIL_CLIENT_ID && process.env.GMAIL_CLIENT_SECRET && process.env.GMAIL_REFRESH_TOKEN);
+}
+
+function toBase64Url(value) {
+  return Buffer.from(value).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function gmailRawMessage({ from, to, subject, html }) {
+  const encodedSubject = `=?UTF-8?B?${Buffer.from(subject, 'utf8').toString('base64')}?=`;
+  const message = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${encodedSubject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=UTF-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    Buffer.from(html, 'utf8').toString('base64'),
+  ].join('\r\n');
+  return toBase64Url(message);
+}
+
+async function gmailAccessToken() {
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: process.env.GMAIL_CLIENT_ID,
+      client_secret: process.env.GMAIL_CLIENT_SECRET,
+      refresh_token: process.env.GMAIL_REFRESH_TOKEN,
+      grant_type: 'refresh_token',
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.access_token) {
+    throw new Error(`Google no entregó un acceso: ${response.status} ${payload.error || ''}`.trim());
+  }
+  return payload.access_token;
+}
+
+async function sendViaGmail(options) {
+  const auth = smtpAuth();
+  const accessToken = await gmailAccessToken();
+  const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      raw: gmailRawMessage({
+        from: fromAddress(auth.user),
+        to: options.to,
+        subject: options.subject,
+        html: options.html,
+      }),
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Gmail respondió ${response.status}: ${body.slice(0, 300)}`);
+  }
+  console.log('Email enviado por la API de Gmail');
+}
+
+async function sendViaBrevo(options) {
+  const sender = senderParts(smtpAuth().user);
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'api-key': process.env.BREVO_API_KEY.trim(),
+      'content-type': 'application/json',
+      accept: 'application/json',
+    },
+    body: JSON.stringify({
+      sender,
+      to: [{ email: options.to }],
+      subject: options.subject,
+      htmlContent: options.html,
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Brevo respondió ${response.status}: ${body.slice(0, 300)}`);
+  }
+  console.log('Email enviado por HTTPS');
+}
+
 function connectionFailed(error) {
   const code = error?.code || '';
   const message = error?.message || '';
@@ -131,9 +228,17 @@ function renderUserInscriptionEmail({ title, subject, body, logoUrl, values }) {
 }
 
 async function sendMail(options) {
+  if (gmailConfigured()) {
+    await sendViaGmail(options);
+    return;
+  }
+  if (process.env.BREVO_API_KEY) {
+    await sendViaBrevo(options);
+    return;
+  }
   const auth = smtpAuth();
   if (!auth.user || !auth.pass) {
-    console.error('SMTP incompleto en el servidor: faltan SMTP_USER o SMTP_PASS');
+    console.error('Correo sin configurar: falta BREVO_API_KEY o SMTP_USER y SMTP_PASS');
     return;
   }
   const hostname = smtpHostname();
@@ -161,6 +266,7 @@ async function sendMail(options) {
       transporter.close();
     }
   }
+  console.error('Gmail no acepta la conexión desde este servidor. Añade BREVO_API_KEY para enviar por HTTPS.');
   throw lastError;
 }
 
