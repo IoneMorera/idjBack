@@ -9,23 +9,51 @@ const {
   getEmailTemplate,
 } = require('../utils/emailTemplate');
 
-const ADMIN_EMAIL = process.env.SMTP_USER || 'ludovyp@gmail.com';
+function smtpAuth() {
+  return {
+    user: (process.env.SMTP_USER || '').trim(),
+    pass: (process.env.SMTP_PASS || '').replace(/\s+/g, ''),
+  };
+}
 
-const smtpPort = parseInt(process.env.SMTP_PORT || '587', 10);
+function fromAddress(user) {
+  const raw = (process.env.SMTP_FROM || '').trim().replace(/^["']|["']$/g, '');
+  if (raw.includes('@') && raw.includes('<')) return raw;
+  if (user) return `"Ludo VyP" <${user}>`;
+  return '"Ludo VyP" <ludovyp@gmail.com>';
+}
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: smtpPort,
-  secure: smtpPort === 465,
-  family: 4,
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 20000,
-  auth: {
-    user: process.env.SMTP_USER || '',
-    pass: process.env.SMTP_PASS || '',
-  },
-});
+function smtpAttempts() {
+  const configured = parseInt(process.env.SMTP_PORT || '587', 10);
+  const attempts = Number.isInteger(configured) && configured > 0
+    ? [[configured, configured === 465]]
+    : [[587, false]];
+  if (!attempts.some(([, secure]) => secure)) attempts.push([465, true]);
+  if (!attempts.some(([port]) => port === 587)) attempts.push([587, false]);
+  return attempts;
+}
+
+function createTransport(port, secure) {
+  const auth = smtpAuth();
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port,
+    secure,
+    family: 4,
+    requireTLS: !secure,
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 20000,
+    auth,
+  });
+}
+
+function connectionFailed(error) {
+  const code = error?.code || '';
+  const message = error?.message || '';
+  return ['ETIMEDOUT', 'ESOCKET', 'ECONNECTION', 'ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ENOTFOUND', 'EAI_AGAIN'].includes(code)
+    || /timed out|greeting never received|connection|socket/i.test(message);
+}
 
 function emailWrapper(content, { title = 'Ludo VyP', logoUrl } = {}) {
   const logo = logoUrl
@@ -83,15 +111,30 @@ function renderUserInscriptionEmail({ title, subject, body, logoUrl, values }) {
 }
 
 async function sendMail(options) {
-  if (!process.env.SMTP_USER) {
-    console.log(`[SMTP no configurado] Se habría enviado email a ${options.to}: ${options.subject}`);
+  const auth = smtpAuth();
+  if (!auth.user || !auth.pass) {
+    console.error('SMTP incompleto en el servidor: faltan SMTP_USER o SMTP_PASS');
     return;
   }
-  await transporter.sendMail({
-    from: process.env.SMTP_FROM || `"Ludo VyP" <${ADMIN_EMAIL}>`,
-    ...options,
-  });
-  console.log(`Email enviado a ${options.to}: ${options.subject}`);
+  let lastError = null;
+  for (const [port, secure] of smtpAttempts()) {
+    const transporter = createTransport(port, secure);
+    try {
+      await transporter.sendMail({
+        from: fromAddress(auth.user),
+        ...options,
+      });
+      console.log(`Email enviado por el puerto ${port}`);
+      return;
+    } catch (error) {
+      lastError = error;
+      console.error(`SMTP puerto ${port} falló: ${error.code || ''} ${error.responseCode || ''} ${error.message}`);
+      if (!connectionFailed(error)) break;
+    } finally {
+      transporter.close();
+    }
+  }
+  throw lastError;
 }
 
 async function sendInscriptionEmailToUser(inscription) {
@@ -199,7 +242,7 @@ async function sendInscriptionEmailToAdmin(inscription) {
     console.error('No se pudo cargar la cabecera del correo:', error.message);
   }
   await sendMail({
-    to: ADMIN_EMAIL,
+    to: smtpAuth().user,
     subject: `Nueva inscripción - ${inscription.nombre} ${inscription.apellidos} - ${inscription.eventName}`,
     html: renderAdminInscriptionEmail({ ...inscription, title, logoUrl }),
   });
