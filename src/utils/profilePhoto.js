@@ -20,6 +20,9 @@ async function ensureBucket() {
     if (createError && !/already exists|duplicate/i.test(createError.message || '')) {
       throw createError;
     }
+  } else if (!data.public) {
+    const { error: publicError } = await supabase.storage.updateBucket(BUCKET, { public: true });
+    if (publicError) throw publicError;
   }
 
   bucketReady = true;
