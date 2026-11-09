@@ -157,8 +157,17 @@ exports.createInscription = async (req, res) => {
       return res.status(400).json({ message: 'Nombre, apellidos, email y DNI son obligatorios' });
     }
 
-    const { data: event } = await supabase
-      .from('events').select('*').eq('id', eventId).maybeSingle();
+    const [
+      { data: event, error: eventError },
+      { data: existing, error: existingError },
+      { data: pendingState, error: stateError },
+    ] = await Promise.all([
+      supabase.from('events').select('*').eq('id', eventId).maybeSingle(),
+      supabase.from('inscriptions').select('id').eq('user_id', userId).eq('event_id', eventId).maybeSingle(),
+      supabase.from('inscription_states').select('id').eq('nombre', PREINSCRITO_STATE).maybeSingle(),
+    ]);
+    if (eventError) throw eventError;
+    if (existingError) throw existingError;
     if (!event || (event.hidden && req.user.role !== 'administrador')) {
       return res.status(404).json({ message: 'Evento no encontrado' });
     }
@@ -168,17 +177,10 @@ exports.createInscription = async (req, res) => {
       return res.status(403).json({ message: availability.message });
     }
 
-    const { data: existing } = await supabase
-      .from('inscriptions').select('id').eq('user_id', userId).eq('event_id', eventId).maybeSingle();
     if (existing) {
       return res.status(409).json({ message: 'Ya estás inscrito en este evento' });
     }
 
-    const { data: pendingState, error: stateError } = await supabase
-      .from('inscription_states')
-      .select('id')
-      .eq('nombre', PREINSCRITO_STATE)
-      .maybeSingle();
     if (stateError) throw stateError;
     if (!pendingState) {
       return res.status(500).json({ message: `Falta el estado "${PREINSCRITO_STATE}" en la base de datos` });
@@ -230,28 +232,32 @@ exports.createInscription = async (req, res) => {
     const eventName = `${event.nombre} - ${event.mes} ${event.anio}`;
     const tarifa = flat.tariff_nombre || '';
     const precio = flat.tariff_precio != null ? formatPrice(flat.tariff_precio) : '';
-    const campos = await inscriptionFormFields(eventId, dynamicFields);
-    await sendInscriptionEmails({
-      eventId: event.id,
-      email,
-      nombre,
-      apellidos,
-      telefono,
-      dni,
-      usuario: req.user.username,
-      eventName,
-      mes: event.mes,
-      anio: event.anio,
-      estado: PREINSCRITO_STATE,
-      tarifa,
-      precio,
-      campos,
-    });
 
     res.status(201).json({
       message: 'Inscripción realizada correctamente. Recibirás un email de confirmación.',
       inscription: flat,
     });
+
+    void inscriptionFormFields(eventId, dynamicFields)
+      .then((campos) => sendInscriptionEmails({
+        eventId: event.id,
+        email,
+        nombre,
+        apellidos,
+        telefono,
+        dni,
+        usuario: req.user.username,
+        eventName,
+        mes: event.mes,
+        anio: event.anio,
+        estado: PREINSCRITO_STATE,
+        tarifa,
+        precio,
+        campos,
+      }))
+      .catch((emailError) => {
+        console.error('Error al enviar correos de inscripción:', emailError);
+      });
   } catch (error) {
     console.error('Error al crear inscripción:', error);
     res.status(500).json({ message: 'Error interno del servidor' });
