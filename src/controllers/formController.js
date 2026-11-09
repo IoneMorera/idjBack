@@ -1,6 +1,25 @@
 const supabase = require('../database');
 const { withoutInternalFormFields } = require('../utils/hotelPayment');
 
+async function replaceFieldOptions(fieldId, options) {
+  const { error: deleteError } = await supabase.from('form_field_options').delete().eq('field_id', fieldId);
+  if (deleteError) throw deleteError;
+  if (!options.length) return [];
+
+  const rows = options
+    .filter((option) => option && String(option.label || '').trim())
+    .map((option, index) => ({
+      field_id: Number(fieldId),
+      label: String(option.label).trim(),
+      sort_order: index,
+    }));
+
+  if (!rows.length) return [];
+  const { data, error } = await supabase.from('form_field_options').insert(rows).select();
+  if (error) throw error;
+  return data || [];
+}
+
 // Obtener formulario completo de un evento (bloques + campos + opciones)
 exports.getEventForm = async (req, res) => {
   try {
@@ -113,7 +132,7 @@ exports.deleteBlock = async (req, res) => {
 exports.createField = async (req, res) => {
   try {
     const { blockId } = req.params;
-    const { label, field_type, required } = req.body;
+    const { label, field_type, required, options } = req.body;
 
     if (!label || !field_type) {
       return res.status(400).json({ message: 'Label y tipo son obligatorios' });
@@ -141,6 +160,10 @@ exports.createField = async (req, res) => {
 
     if (error) throw error;
 
+    if (Array.isArray(options)) {
+      field.form_field_options = await replaceFieldOptions(field.id, options);
+    }
+
     res.status(201).json({ message: 'Campo creado', field });
   } catch (error) {
     console.error('Error al crear campo:', error);
@@ -152,7 +175,7 @@ exports.createField = async (req, res) => {
 exports.updateField = async (req, res) => {
   try {
     const { fieldId } = req.params;
-    const { label, field_type, required, sort_order } = req.body;
+    const { label, field_type, required, sort_order, options } = req.body;
 
     const updates = {};
     if (label !== undefined) updates.label = label;
@@ -168,6 +191,10 @@ exports.updateField = async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    if (Array.isArray(options)) {
+      field.form_field_options = await replaceFieldOptions(field.id, options);
+    }
 
     res.json({ message: 'Campo actualizado', field });
   } catch (error) {
