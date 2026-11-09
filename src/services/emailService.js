@@ -1,5 +1,6 @@
 require('../preferIpv4');
 
+const dns = require('dns');
 const nodemailer = require('nodemailer');
 const {
   applyShortcodes,
@@ -33,17 +34,36 @@ function smtpAttempts() {
   return attempts;
 }
 
-function createTransport(port, secure) {
+function smtpHostname() {
+  return process.env.SMTP_HOST || 'smtp.gmail.com';
+}
+
+function resolveIpv4(hostname) {
+  return new Promise((resolve, reject) => {
+    dns.resolve4(hostname, (error, addresses) => {
+      if (error || !addresses || addresses.length === 0) {
+        reject(error || new Error(`Sin dirección IPv4 para ${hostname}`));
+        return;
+      }
+      resolve(addresses[0]);
+    });
+  });
+}
+
+function createTransport(port, secure, ipv4) {
   const auth = smtpAuth();
+  const hostname = smtpHostname();
   return nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    host: ipv4 || hostname,
     port,
     secure,
+    servername: hostname,
     family: 4,
     requireTLS: !secure,
     connectionTimeout: 10000,
     greetingTimeout: 10000,
     socketTimeout: 20000,
+    tls: { servername: hostname },
     auth,
   });
 }
@@ -116,9 +136,16 @@ async function sendMail(options) {
     console.error('SMTP incompleto en el servidor: faltan SMTP_USER o SMTP_PASS');
     return;
   }
+  const hostname = smtpHostname();
+  let ipv4 = null;
+  try {
+    ipv4 = await resolveIpv4(hostname);
+  } catch (error) {
+    console.error(`No se pudo resolver IPv4 de ${hostname}: ${error.message}`);
+  }
   let lastError = null;
   for (const [port, secure] of smtpAttempts()) {
-    const transporter = createTransport(port, secure);
+    const transporter = createTransport(port, secure, ipv4);
     try {
       await transporter.sendMail({
         from: fromAddress(auth.user),
