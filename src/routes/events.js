@@ -5,6 +5,7 @@ const foodController = require('../controllers/foodController');
 const tariffController = require('../controllers/tariffController');
 const foodRoutes = require('./food');
 const tariffRoutes = require('./tariffs');
+const emailTemplateRoutes = require('./emailTemplate');
 const { authMiddleware, adminMiddleware } = require('../middleware/auth');
 
 router.get('/', authMiddleware, eventController.getAllEvents);
@@ -12,8 +13,10 @@ router.patch('/:id/food-ordering', authMiddleware, adminMiddleware, foodControll
 router.patch('/:id/hotel-food', authMiddleware, adminMiddleware, tariffController.setHotelFoodEnabled);
 router.use('/:eventId/food', foodRoutes);
 router.use('/:eventId/tariffs', tariffRoutes);
+router.use('/:eventId/email-template', emailTemplateRoutes);
 router.get('/:id', authMiddleware, eventController.getEventById);
 router.post('/', authMiddleware, adminMiddleware, eventController.createEvent);
+router.patch('/:id', authMiddleware, adminMiddleware, eventController.updateEventSettings);
 router.delete('/:id', authMiddleware, adminMiddleware, eventController.deleteEvent);
 
 module.exports = router;

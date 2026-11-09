@@ -1,6 +1,18 @@
 const supabase = require('../database');
 const { sendInscriptionEmails } = require('../services/emailService');
-const { pagoHotelFromValues, setHotelPayment } = require('../utils/hotelPayment');
+const { HOTEL_PAYMENT_BLOCK, HOTEL_PAYMENT_LABEL, pagoHotelFromValues, setHotelPayment } = require('../utils/hotelPayment');
+const {
+  FIRST_PAYMENT_LABEL,
+  isPagoAplazadoName,
+  primerPagoFromValues,
+  protectedFieldIds,
+  setFirstPayment,
+} = require('../utils/firstPayment');
+const {
+  PREINSCRITO_STATE,
+  WAITLIST_STATE,
+  inscriptionAvailability,
+} = require('../utils/inscriptionWindow');
 
 async function loadFieldMeta(fieldIds) {
   const uniqueIds = [...new Set(fieldIds.filter(Boolean))];
@@ -30,6 +42,36 @@ function withFieldMeta(rows, meta) {
 async function enrichFieldValues(rows) {
   const meta = await loadFieldMeta((rows || []).map((row) => row.field_id));
   return withFieldMeta(rows, meta);
+}
+
+function formatPrice(value) {
+  return new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(Number(value));
+}
+
+async function inscriptionFormFields(eventId, dynamicFields) {
+  const { data: blocks, error } = await supabase
+    .from('form_blocks')
+    .select('titulo, sort_order, form_fields ( id, label, sort_order )')
+    .eq('event_id', eventId)
+    .order('sort_order');
+
+  if (error) throw error;
+
+  const answers = dynamicFields && typeof dynamicFields === 'object' ? dynamicFields : {};
+  const campos = [];
+  const sortedBlocks = [...(blocks || [])].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+
+  for (const block of sortedBlocks) {
+    if (block.titulo === HOTEL_PAYMENT_BLOCK) continue;
+    const fields = [...(block.form_fields || [])].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+    for (const field of fields) {
+      if (field.label === HOTEL_PAYMENT_LABEL || field.label === FIRST_PAYMENT_LABEL) continue;
+      const value = answers[String(field.id)] ?? answers[field.id];
+      campos.push({ label: field.label, value: value ?? '' });
+    }
+  }
+
+  return campos;
 }
 
 exports.getInscriptionStates = async (req, res) => {
@@ -117,8 +159,13 @@ exports.createInscription = async (req, res) => {
 
     const { data: event } = await supabase
       .from('events').select('*').eq('id', eventId).maybeSingle();
-    if (!event) {
+    if (!event || (event.hidden && req.user.role !== 'administrador')) {
       return res.status(404).json({ message: 'Evento no encontrado' });
+    }
+
+    const availability = inscriptionAvailability(event);
+    if (!availability.open) {
+      return res.status(403).json({ message: availability.message });
     }
 
     const { data: existing } = await supabase
@@ -127,16 +174,20 @@ exports.createInscription = async (req, res) => {
       return res.status(409).json({ message: 'Ya estás inscrito en este evento' });
     }
 
-    const { data: pendienteState } = await supabase
+    const { data: pendingState, error: stateError } = await supabase
       .from('inscription_states')
       .select('id')
-      .eq('nombre', 'Pendiente de Confirmación')
-      .single();
+      .eq('nombre', PREINSCRITO_STATE)
+      .maybeSingle();
+    if (stateError) throw stateError;
+    if (!pendingState) {
+      return res.status(500).json({ message: `Falta el estado "${PREINSCRITO_STATE}" en la base de datos` });
+    }
 
     const insertData = {
       user_id: userId,
       event_id: eventId,
-      state_id: pendienteState.id,
+      state_id: pendingState.id,
       dni, nombre, apellidos,
       telefono: telefono || null,
       email,
@@ -177,7 +228,25 @@ exports.createInscription = async (req, res) => {
     delete flat.event_tariffs;
 
     const eventName = `${event.nombre} - ${event.mes} ${event.anio}`;
-    await sendInscriptionEmails({ email, nombre, apellidos, telefono, dni, eventName });
+    const tarifa = flat.tariff_nombre || '';
+    const precio = flat.tariff_precio != null ? formatPrice(flat.tariff_precio) : '';
+    const campos = await inscriptionFormFields(eventId, dynamicFields);
+    await sendInscriptionEmails({
+      eventId: event.id,
+      email,
+      nombre,
+      apellidos,
+      telefono,
+      dni,
+      usuario: req.user.username,
+      eventName,
+      mes: event.mes,
+      anio: event.anio,
+      estado: PREINSCRITO_STATE,
+      tarifa,
+      precio,
+      campos,
+    });
 
     res.status(201).json({
       message: 'Inscripción realizada correctamente. Recibirás un email de confirmación.',
@@ -212,9 +281,15 @@ exports.updateMyInscription = async (req, res) => {
       return res.status(404).json({ message: 'No tienes inscripción en este evento' });
     }
 
-    // Solo permitir edición si el estado es "Pendiente de Confirmación"
-    if (inscription.inscription_states?.nombre !== 'Pendiente de Confirmación') {
-      return res.status(403).json({ message: 'Solo puedes editar tu inscripción mientras tu estado sea "Pendiente de Confirmación"' });
+    const editableStates = [PREINSCRITO_STATE, WAITLIST_STATE];
+    if (!editableStates.includes(inscription.inscription_states?.nombre)) {
+      return res.status(403).json({ message: 'Solo puedes editar tu inscripción mientras esté pendiente de confirmación o en lista de espera' });
+    }
+
+    const { data: event } = await supabase.from('events').select('*').eq('id', eventId).maybeSingle();
+    const availability = event ? inscriptionAvailability(event) : { open: false, message: 'Evento no encontrado' };
+    if (!availability.open) {
+      return res.status(403).json({ message: availability.message });
     }
 
     const updateData = {
@@ -235,12 +310,18 @@ exports.updateMyInscription = async (req, res) => {
 
     if (updateError) throw updateError;
 
-    // Actualizar campos dinámicos: borrar los anteriores y reinsertar
+    // Actualizar campos dinámicos: borrar los anteriores y reinsertar.
+    // Los campos internos (hotel y primer pago) los gestiona el admin y se conservan.
     if (dynamicFields && typeof dynamicFields === 'object') {
-      const { error: deleteError } = await supabase
+      const keepIds = await protectedFieldIds(eventId);
+      let deleteQuery = supabase
         .from('inscription_field_values')
         .delete()
         .eq('inscription_id', inscription.id);
+      if (keepIds.length > 0) {
+        deleteQuery = deleteQuery.not('field_id', 'in', `(${keepIds.join(',')})`);
+      }
+      const { error: deleteError } = await deleteQuery;
 
       if (deleteError) console.error('Error al borrar campos dinámicos anteriores:', deleteError);
 
@@ -342,13 +423,16 @@ exports.updateHotelPayment = async (req, res) => {
 
     const { data: inscription, error: findError } = await supabase
       .from('inscriptions')
-      .select('id, event_id')
+      .select('id, event_id, events ( hotel_food_enabled )')
       .eq('id', id)
       .maybeSingle();
 
     if (findError) throw findError;
     if (!inscription) {
       return res.status(404).json({ message: 'Inscripción no encontrada' });
+    }
+    if (!inscription.events?.hotel_food_enabled) {
+      return res.status(400).json({ message: 'Este evento no usa confirmación de hotel' });
     }
 
     await setHotelPayment(inscription.id, inscription.event_id, pagoHotel);
@@ -359,6 +443,42 @@ exports.updateHotelPayment = async (req, res) => {
     });
   } catch (error) {
     console.error('Error al actualizar la confirmación del hotel:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
+exports.updateFirstPayment = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { primerPago } = req.body;
+
+    if (typeof primerPago !== 'boolean') {
+      return res.status(400).json({ message: 'Indica si el primer pago está realizado' });
+    }
+
+    const { data: inscription, error: findError } = await supabase
+      .from('inscriptions')
+      .select('id, event_id, event_tariffs ( nombre )')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (findError) throw findError;
+    if (!inscription) {
+      return res.status(404).json({ message: 'Inscripción no encontrada' });
+    }
+
+    if (!isPagoAplazadoName(inscription.event_tariffs?.nombre)) {
+      return res.status(400).json({ message: 'El primer pago solo se marca en tarifas de pago aplazado' });
+    }
+
+    await setFirstPayment(inscription.id, inscription.event_id, primerPago);
+
+    res.json({
+      message: 'Primer pago actualizado',
+      primer_pago: primerPago,
+    });
+  } catch (error) {
+    console.error('Error al actualizar el primer pago:', error);
     res.status(500).json({ message: 'Error interno del servidor' });
   }
 };
@@ -421,6 +541,7 @@ exports.getAllInscriptions = async (req, res) => {
       tariff_precio: row.event_tariffs?.precio_total,
       field_values: fieldValuesMap[row.id] || [],
       pago_hotel: pagoHotelFromValues(fieldValuesMap[row.id] || []),
+      primer_pago: primerPagoFromValues(fieldValuesMap[row.id] || []),
       inscription_states: undefined,
       events: undefined,
       users: undefined,

@@ -12,6 +12,7 @@ const userRoutes = require('./routes/users');
 const eventRoutes = require('./routes/events');
 const inscriptionRoutes = require('./routes/inscriptions');
 const formRoutes = require('./routes/forms');
+const { shouldRedirectMissingUpload, missingUploadRedirectUrl } = require('./utils/profilePhoto');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -48,6 +49,11 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 app.use('/uploads', express.static(uploadsDir));
+app.use('/uploads', (req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  if (!shouldRedirectMissingUpload(req)) return res.status(404).end();
+  return res.redirect(302, missingUploadRedirectUrl(req));
+});
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });

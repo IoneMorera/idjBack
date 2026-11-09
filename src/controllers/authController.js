@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const supabase = require('../database');
+const { uploadProfilePhoto, saveToDisk } = require('../utils/profilePhoto');
 
 const USER_SELECT = 'id, username, nombre, apellidos, email, telefono, foto, role, created_at';
 
@@ -124,13 +125,65 @@ exports.updateProfile = async (req, res) => {
   }
 };
 
+exports.changePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword, newPasswordConfirm } = req.body;
+
+    if (!currentPassword || !newPassword || !newPasswordConfirm) {
+      return res.status(400).json({ message: 'Todos los campos son obligatorios' });
+    }
+    if (newPassword !== newPasswordConfirm) {
+      return res.status(400).json({ message: 'Las contraseñas no coinciden' });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ message: 'La contraseña debe tener al menos 6 caracteres' });
+    }
+    if (newPassword === currentPassword) {
+      return res.status(400).json({ message: 'La nueva contraseña debe ser distinta de la actual' });
+    }
+
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, password')
+      .eq('id', req.user.id)
+      .single();
+
+    if (error) throw error;
+    if (!user) return res.status(404).json({ message: 'Usuario no encontrado' });
+
+    const isPasswordValid = bcrypt.compareSync(currentPassword, user.password);
+    if (!isPasswordValid) {
+      return res.status(401).json({ message: 'La contraseña actual no es correcta' });
+    }
+
+    const hashedPassword = bcrypt.hashSync(newPassword, 10);
+    const { error: updateError } = await supabase
+      .from('users')
+      .update({ password: hashedPassword })
+      .eq('id', req.user.id);
+
+    if (updateError) throw updateError;
+
+    res.json({ message: 'Contraseña actualizada correctamente' });
+  } catch (error) {
+    console.error('Error al cambiar contraseña:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
 exports.updateProfilePhoto = async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ message: 'No se ha proporcionado una imagen' });
     }
 
-    const photoPath = `/uploads/${req.file.filename}`;
+    let photoPath;
+    try {
+      photoPath = await uploadProfilePhoto(req.user.id, req.file);
+    } catch (storageError) {
+      console.error('No se pudo subir la foto a Supabase Storage, se guarda en disco:', storageError);
+      photoPath = saveToDisk(req.user.id, req.file);
+    }
 
     const { data: updatedUser, error } = await supabase
       .from('users')

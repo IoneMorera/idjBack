@@ -12,5 +12,6 @@ router.post('/event/:eventId', authMiddleware, inscriptionController.createInscr
 router.get('/', authMiddleware, adminMiddleware, inscriptionController.getAllInscriptions);
 router.patch('/:id/state', authMiddleware, adminMiddleware, inscriptionController.updateInscriptionState);
 router.patch('/:id/hotel-payment', authMiddleware, adminMiddleware, inscriptionController.updateHotelPayment);
+router.patch('/:id/primer-pago', authMiddleware, adminMiddleware, inscriptionController.updateFirstPayment);
 
 module.exports = router;

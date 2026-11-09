@@ -8,7 +8,9 @@ function withoutInternalFormFields(blocks) {
     .filter((block) => block.titulo !== HOTEL_PAYMENT_BLOCK)
     .map((block) => ({
       ...block,
-      form_fields: (block.form_fields || []).filter((field) => field.label !== HOTEL_PAYMENT_LABEL),
+      form_fields: (block.form_fields || []).filter((field) =>
+        field.label !== HOTEL_PAYMENT_LABEL && field.label !== 'Primer pago realizado',
+      ),
     }));
 }
 
