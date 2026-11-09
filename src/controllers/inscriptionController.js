@@ -240,8 +240,14 @@ exports.createInscription = async (req, res) => {
       inscription: flat,
     });
 
-    void inscriptionFormFields(eventId, dynamicFields)
-      .then((campos) => sendInscriptionEmails({
+    void (async () => {
+      let campos = [];
+      try {
+        campos = await inscriptionFormFields(eventId, dynamicFields);
+      } catch (formError) {
+        console.error('No se pudieron leer los campos para el correo:', formError.message);
+      }
+      await sendInscriptionEmails({
         eventId: event.id,
         email,
         nombre,
@@ -256,10 +262,10 @@ exports.createInscription = async (req, res) => {
         tarifa,
         precio,
         campos,
-      }))
-      .catch((emailError) => {
-        console.error('Error al enviar correos de inscripción:', emailError);
       });
+    })().catch((emailError) => {
+      console.error('Error al enviar correos de inscripción:', emailError);
+    });
   } catch (error) {
     console.error('Error al crear inscripción:', error);
     res.status(500).json({ message: 'Error interno del servidor' });
