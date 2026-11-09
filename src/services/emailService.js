@@ -1,17 +1,23 @@
+require('../preferIpv4');
+
 const nodemailer = require('nodemailer');
 const {
   applyShortcodes,
   buildShortcodeValues,
+  defaultTemplate,
   getDefaultLogoUrl,
   getEmailTemplate,
 } = require('../utils/emailTemplate');
 
 const ADMIN_EMAIL = process.env.SMTP_USER || 'ludovyp@gmail.com';
 
+const smtpPort = parseInt(process.env.SMTP_PORT || '587', 10);
+
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: parseInt(process.env.SMTP_PORT || '587'),
-  secure: false,
+  port: smtpPort,
+  secure: smtpPort === 465,
+  family: 4,
   connectionTimeout: 10000,
   greetingTimeout: 10000,
   socketTimeout: 20000,
@@ -89,13 +95,19 @@ async function sendMail(options) {
 }
 
 async function sendInscriptionEmailToUser(inscription) {
-  const template = await getEmailTemplate(inscription.eventId);
+  let template = defaultTemplate();
+  let logoUrl = null;
+  try {
+    template = await getEmailTemplate(inscription.eventId);
+    logoUrl = template.logo_url || await getDefaultLogoUrl();
+  } catch (error) {
+    console.error('No se pudo cargar la plantilla del correo:', error.message);
+  }
   const values = buildShortcodeValues(inscription);
-  const logoUrl = template.logo_url || await getDefaultLogoUrl();
   const rendered = renderUserInscriptionEmail({
-    title: template.title,
-    subject: template.subject,
-    body: template.body,
+    title: template?.title,
+    subject: template?.subject,
+    body: template?.body,
     logoUrl,
     values,
   });
@@ -194,10 +206,17 @@ async function sendInscriptionEmailToAdmin(inscription) {
 }
 
 async function sendInscriptionEmails(inscriptionData) {
-  await Promise.all([
+  const results = await Promise.allSettled([
     sendInscriptionEmailToUser(inscriptionData),
     sendInscriptionEmailToAdmin(inscriptionData),
   ]);
+  const failures = results.filter((result) => result.status === 'rejected');
+  for (const failure of failures) {
+    console.error('Error al enviar un correo de inscripción:', failure.reason);
+  }
+  if (failures.length === results.length) {
+    throw failures[0].reason;
+  }
 }
 
 module.exports = {

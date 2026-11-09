@@ -120,10 +120,12 @@ exports.getMyInscription = async (req, res) => {
 
     const { data: fieldValues } = await supabase
       .from('inscription_field_values')
-      .select('field_id, value')
+      .select('field_id, value, form_fields ( id, label, field_type )')
       .eq('inscription_id', inscription.id);
 
-    const values = await enrichFieldValues(fieldValues || []);
+    const values = withFieldMeta(fieldValues || [], Object.fromEntries(
+      (fieldValues || []).filter((row) => row.form_fields).map((row) => [row.field_id, row.form_fields]),
+    ));
 
     const flat = {
       ...inscription,
@@ -348,10 +350,12 @@ exports.updateMyInscription = async (req, res) => {
     // Recuperar field_values actualizados
     const { data: fieldValues } = await supabase
       .from('inscription_field_values')
-      .select('field_id, value')
+      .select('field_id, value, form_fields ( id, label, field_type )')
       .eq('inscription_id', inscription.id);
 
-    const values = await enrichFieldValues(fieldValues || []);
+    const values = withFieldMeta(fieldValues || [], Object.fromEntries(
+      (fieldValues || []).filter((row) => row.form_fields).map((row) => [row.field_id, row.form_fields]),
+    ));
 
     const flat = {
       ...updated,
@@ -518,12 +522,14 @@ exports.getAllInscriptions = async (req, res) => {
     if (inscriptionIds.length > 0) {
       const { data: allFieldValues, error: valuesError } = await supabase
         .from('inscription_field_values')
-        .select('inscription_id, field_id, value')
+        .select('inscription_id, field_id, value, form_fields ( id, label, field_type )')
         .in('inscription_id', inscriptionIds);
 
       if (valuesError) throw valuesError;
 
-      const meta = await loadFieldMeta((allFieldValues || []).map((row) => row.field_id));
+      const meta = Object.fromEntries(
+        (allFieldValues || []).filter((row) => row.form_fields).map((row) => [row.field_id, row.form_fields]),
+      );
       for (const fv of allFieldValues || []) {
         const field = meta[fv.field_id];
         if (!fieldValuesMap[fv.inscription_id]) fieldValuesMap[fv.inscription_id] = [];

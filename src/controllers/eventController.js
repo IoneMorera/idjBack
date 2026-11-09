@@ -39,21 +39,23 @@ exports.getAllEvents = async (req, res) => {
     const isAdmin = req.user?.role === 'administrador';
     const visible = (events || []).filter((event) => isAdmin || !event.hidden);
 
-    let stateByEvent = {};
-    if (req.user?.id) {
-      const { data: inscriptions } = await supabase
-        .from('inscriptions')
-        .select('event_id, inscription_states ( nombre )')
-        .eq('user_id', req.user.id);
+    const [inscriptionsResult, countsByEvent] = await Promise.all([
+      req.user?.id
+        ? supabase
+          .from('inscriptions')
+          .select('event_id, inscription_states ( nombre )')
+          .eq('user_id', req.user.id)
+        : Promise.resolve({ data: [] }),
+      isAdmin
+        ? inscriptionCountsForEvents(visible.map((event) => event.id))
+        : Promise.resolve({}),
+    ]);
 
-      stateByEvent = Object.fromEntries(
-        (inscriptions || []).map((row) => [row.event_id, row.inscription_states?.nombre || null]),
-      );
-    }
+    if (inscriptionsResult.error) throw inscriptionsResult.error;
 
-    const countsByEvent = isAdmin
-      ? await inscriptionCountsForEvents(visible.map((event) => event.id))
-      : {};
+    const stateByEvent = Object.fromEntries(
+      (inscriptionsResult.data || []).map((row) => [row.event_id, row.inscription_states?.nombre || null]),
+    );
     const withState = visible.map((event) => {
       const presented = {
         ...withAvailability(event),

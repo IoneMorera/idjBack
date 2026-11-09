@@ -32,10 +32,14 @@ function inscriptionAvailability(event, now = new Date()) {
   return { open: true, reason: 'open', message: 'Inscripciones abiertas' };
 }
 
+let stateIdsCache = null;
+
 async function loadStateIds() {
+  if (stateIdsCache) return stateIdsCache;
   const { data, error } = await supabase.from('inscription_states').select('id, nombre');
   if (error) throw error;
-  return Object.fromEntries((data || []).map((state) => [state.nombre, state.id]));
+  stateIdsCache = Object.fromEntries((data || []).map((state) => [state.nombre, state.id]));
+  return stateIdsCache;
 }
 
 function emptyCounts() {
