@@ -275,7 +275,9 @@ async function sendInscriptionEmailToUser(inscription) {
   let logoUrl = null;
   try {
     template = await getEmailTemplate(inscription.eventId);
-    logoUrl = template.logo_url || await getDefaultLogoUrl();
+    logoUrl = template.logo_url?.startsWith('https://')
+      ? template.logo_url
+      : await getDefaultLogoUrl();
   } catch (error) {
     console.error('No se pudo cargar la plantilla del correo:', error.message);
   }
@@ -368,7 +370,7 @@ async function sendInscriptionEmailToAdmin(inscription) {
       const template = await getEmailTemplate(inscription.eventId);
       const values = buildShortcodeValues(inscription);
       title = applyShortcodes(template.title, values);
-      logoUrl = template.logo_url || null;
+      logoUrl = template.logo_url?.startsWith('https://') ? template.logo_url : null;
     }
     if (!logoUrl) logoUrl = await getDefaultLogoUrl();
   } catch (error) {
@@ -378,6 +380,44 @@ async function sendInscriptionEmailToAdmin(inscription) {
     to: smtpAuth().user,
     subject: `Nueva inscripción - ${inscription.nombre} ${inscription.apellidos} - ${inscription.eventName}`,
     html: renderAdminInscriptionEmail({ ...inscription, title, logoUrl }),
+  });
+}
+
+function renderRegistrationEmail({ username, nombre, apellidos, email, telefono, password, logoUrl }) {
+  const rows = [
+    { label: 'Usuario', value: username, strong: true },
+    { label: 'Nombre', value: nombre },
+    { label: 'Apellidos', value: apellidos },
+    { label: 'Email', value: email },
+    { label: 'Teléfono', value: telefono },
+    { label: 'Contraseña', value: password },
+  ];
+
+  return emailWrapper(`
+      <h2 style="color: #1c1410; margin-top: 0;">¡Hola, ${escapeHtml(nombre)}!</h2>
+      <p style="color: #44403c; font-size: 16px; line-height: 1.6;">
+        Tu cuenta se ha creado correctamente. Estos son los datos con los que te has registrado:
+      </p>
+      <table style="width: 100%; border-collapse: collapse; margin-top: 16px;">
+        ${rows.map((row, index) => emailRow(row.label, row.value, { last: index === rows.length - 1, strong: row.strong })).join('')}
+      </table>
+      <p style="color: #78716c; font-size: 14px; margin-top: 20px;">
+        Puedes iniciar sesión en la web con tu correo y la contraseña indicada. Guarda este mensaje para consultar tus datos de acceso.
+      </p>
+    `, { title: 'Ludo VyP', logoUrl });
+}
+
+async function sendRegistrationEmail(user) {
+  let logoUrl = null;
+  try {
+    logoUrl = await getDefaultLogoUrl();
+  } catch (error) {
+    console.error('No se pudo cargar el logo del correo de registro:', error.message);
+  }
+  await sendMail({
+    to: user.email,
+    subject: 'Confirmación de registro - Ludo VyP',
+    html: renderRegistrationEmail({ ...user, logoUrl }),
   });
 }
 
@@ -399,6 +439,7 @@ module.exports = {
   sendInscriptionEmails,
   sendInscriptionEmailToUser,
   sendInscriptionEmailToAdmin,
+  sendRegistrationEmail,
   renderAdminInscriptionEmail,
   renderUserInscriptionEmail,
   // Compatibilidad con código anterior
