@@ -8,6 +8,7 @@ const {
   defaultTemplate,
   getDefaultLogoUrl,
   getEmailTemplate,
+  loadEmails,
 } = require('../utils/emailTemplate');
 
 function smtpAuth() {
@@ -270,16 +271,14 @@ async function sendMail(options) {
   throw lastError;
 }
 
-async function sendInscriptionEmailToUser(inscription) {
-  let template = defaultTemplate();
+async function sendStoredTemplate(template, inscription) {
   let logoUrl = null;
   try {
-    template = await getEmailTemplate(inscription.eventId);
-    logoUrl = template.logo_url?.startsWith('https://')
+    logoUrl = template?.logo_url?.startsWith('https://')
       ? template.logo_url
       : await getDefaultLogoUrl();
   } catch (error) {
-    console.error('No se pudo cargar la plantilla del correo:', error.message);
+    console.error('No se pudo cargar el logotipo del correo:', error.message);
   }
   const values = buildShortcodeValues(inscription);
   const rendered = renderUserInscriptionEmail({
@@ -294,6 +293,37 @@ async function sendInscriptionEmailToUser(inscription) {
     subject: rendered.subject,
     html: rendered.html,
   });
+}
+
+async function sendInscriptionEmailToUser(inscription) {
+  let template = defaultTemplate();
+  try {
+    template = await getEmailTemplate(inscription.eventId);
+  } catch (error) {
+    console.error('No se pudo cargar la plantilla del correo:', error.message);
+  }
+  await sendStoredTemplate(template, inscription);
+}
+
+async function sendEmailsForTransition(eventId, fromState, toState, inscription) {
+  if (!eventId || !fromState || !toState || fromState === toState) return { sent: 0, failed: 0 };
+  const emails = await loadEmails(eventId);
+  const matches = emails.filter((email) => (
+    email.trigger_enabled
+    && email.from_state === fromState
+    && email.to_state === toState
+  ));
+  if (matches.length === 0) return { sent: 0, failed: 0 };
+
+  const results = await Promise.allSettled(
+    matches.map((template) => sendStoredTemplate(template, inscription)),
+  );
+  const failures = results.filter((result) => result.status === 'rejected');
+  for (const failure of failures) {
+    console.error('Error al enviar correo por cambio de estado:', failure.reason);
+  }
+  if (failures.length === matches.length) throw failures[0].reason;
+  return { sent: matches.length - failures.length, failed: failures.length };
 }
 
 function escapeHtml(value) {
@@ -423,7 +453,12 @@ async function sendRegistrationEmail(user) {
 
 async function sendInscriptionEmails(inscriptionData) {
   const results = await Promise.allSettled([
-    sendInscriptionEmailToUser(inscriptionData),
+    sendEmailsForTransition(
+      inscriptionData.eventId,
+      'Sin inscribir',
+      inscriptionData.estado || 'Pendiente de Confirmación',
+      inscriptionData,
+    ),
     sendInscriptionEmailToAdmin(inscriptionData),
   ]);
   const failures = results.filter((result) => result.status === 'rejected');
@@ -439,6 +474,8 @@ module.exports = {
   sendInscriptionEmails,
   sendInscriptionEmailToUser,
   sendInscriptionEmailToAdmin,
+  sendEmailsForTransition,
+  sendStoredTemplate,
   sendRegistrationEmail,
   renderAdminInscriptionEmail,
   renderUserInscriptionEmail,

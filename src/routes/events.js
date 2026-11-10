@@ -13,7 +13,7 @@ router.patch('/:id/food-ordering', authMiddleware, adminMiddleware, foodControll
 router.patch('/:id/hotel-food', authMiddleware, adminMiddleware, tariffController.setHotelFoodEnabled);
 router.use('/:eventId/food', foodRoutes);
 router.use('/:eventId/tariffs', tariffRoutes);
-router.use('/:eventId/email-template', emailTemplateRoutes);
+router.use('/:eventId/emails', emailTemplateRoutes);
 router.get('/:id', authMiddleware, eventController.getEventById);
 router.post('/', authMiddleware, adminMiddleware, eventController.createEvent);
 router.patch('/:id', authMiddleware, adminMiddleware, eventController.updateEventSettings);

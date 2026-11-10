@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const supabase = require('../database');
@@ -36,6 +37,9 @@ const BASE_SHORTCODES = [
   { code: 'precio', label: 'Precio de la tarifa', sample: '155,00 €' },
 ];
 
+const DEFAULT_EMAIL_NAME = 'Correo al Usuario';
+const SIN_INSCRIBIR_STATE = 'Sin inscribir';
+const PENDIENTE_STATE = 'Pendiente de Confirmación';
 const DEFAULT_TITLE = 'Ludo VyP';
 const DEFAULT_SUBJECT = 'Inscripción recibida - [evento]';
 const DEFAULT_BODY = `¡Hola [nombre]!
@@ -147,56 +151,144 @@ async function getDefaultLogoUrl() {
   return defaultLogoUrl;
 }
 
-async function readStoredTemplate(eventId) {
+function cleanName(value) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return text.slice(0, 80);
+}
+
+function normalizeEmail(raw) {
+  const content = raw && typeof raw === 'object' ? raw : {};
+  return {
+    id: String(content.id || 'default'),
+    name: cleanName(content.name) || DEFAULT_EMAIL_NAME,
+    title: content.title || DEFAULT_TITLE,
+    subject: content.subject || DEFAULT_SUBJECT,
+    body: content.body || DEFAULT_BODY,
+    logo_url: content.logo_url || null,
+    trigger_enabled: content.trigger_enabled === true,
+    from_state: content.from_state || null,
+    to_state: content.to_state || null,
+  };
+}
+
+function defaultTriggeredEmail(content = defaultTemplate()) {
+  return normalizeEmail({
+    id: 'default',
+    name: DEFAULT_EMAIL_NAME,
+    ...content,
+    trigger_enabled: true,
+    from_state: SIN_INSCRIBIR_STATE,
+    to_state: PENDIENTE_STATE,
+  });
+}
+
+async function readRawTemplate(eventId) {
   await ensureBuckets();
   const { data, error } = await supabase.storage.from(TEMPLATE_BUCKET).download(`${eventId}.json`);
   if (error || !data) return null;
   const text = typeof data.text === 'function' ? await data.text() : Buffer.from(data).toString('utf8');
-  const parsed = JSON.parse(text);
-  return {
-    title: parsed.title || DEFAULT_TITLE,
-    subject: parsed.subject || DEFAULT_SUBJECT,
-    body: parsed.body || DEFAULT_BODY,
-    logo_url: parsed.logo_url || null,
-  };
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
-async function getEmailTemplate(eventId) {
-  if (!eventId) return defaultTemplate();
-  const stored = await readStoredTemplate(eventId);
-  return stored || defaultTemplate();
+async function loadEmails(eventId) {
+  if (!eventId) return [defaultTriggeredEmail()];
+  const parsed = await readRawTemplate(eventId);
+  if (!parsed) return [defaultTriggeredEmail()];
+  if (Array.isArray(parsed.emails)) {
+    return parsed.emails.map(normalizeEmail);
+  }
+  if (parsed.title || parsed.subject || parsed.body || parsed.logo_url) {
+    return [defaultTriggeredEmail(parsed)];
+  }
+  return [defaultTriggeredEmail()];
 }
 
-async function saveEmailTemplate(eventId, template) {
+async function saveEmails(eventId, emails) {
   await ensureBuckets();
   const payload = Buffer.from(JSON.stringify({
-    title: template.title,
-    subject: template.subject,
-    body: template.body,
-    logo_url: template.logo_url || null,
+    emails: emails.map(normalizeEmail),
   }));
   const { error } = await supabase.storage.from(TEMPLATE_BUCKET).upload(`${eventId}.json`, payload, {
     contentType: 'application/json',
     upsert: true,
   });
   if (error) throw error;
+  return loadEmails(eventId);
+}
+
+async function getEmailById(eventId, emailId) {
+  const emails = await loadEmails(eventId);
+  return emails.find((email) => email.id === String(emailId)) || null;
+}
+
+async function getEmailTemplate(eventId) {
+  if (!eventId) return defaultTemplate();
+  const emails = await loadEmails(eventId);
+  const main = emails.find((email) => (
+    email.trigger_enabled
+    && email.from_state === SIN_INSCRIBIR_STATE
+    && email.to_state === PENDIENTE_STATE
+  )) || emails[0];
+  if (!main) return defaultTemplate();
+  return {
+    title: main.title,
+    subject: main.subject,
+    body: main.body,
+    logo_url: main.logo_url,
+  };
+}
+
+async function saveEmailTemplate(eventId, template) {
+  const emails = await loadEmails(eventId);
+  const index = emails.findIndex((email) => email.id === 'default');
+  const target = index >= 0 ? index : 0;
+  emails[target] = normalizeEmail({
+    ...emails[target],
+    title: template.title,
+    subject: template.subject,
+    body: template.body,
+    logo_url: template.logo_url || null,
+  });
+  await saveEmails(eventId, emails);
   return getEmailTemplate(eventId);
 }
 
-async function uploadEmailLogo(eventId, file) {
+async function uploadEmailLogo(eventId, emailId, file) {
   await ensureBuckets();
+  const emails = await loadEmails(eventId);
+  const index = emails.findIndex((email) => email.id === String(emailId));
+  if (index < 0) {
+    const missing = new Error('Correo no encontrado');
+    missing.status = 404;
+    throw missing;
+  }
   const ext = path.extname(file.originalname || '').toLowerCase() || '.png';
-  const objectPath = `event-${eventId}-${Date.now()}${ext}`;
+  const safeId = String(emailId).replace(/[^a-zA-Z0-9_-]/g, '');
+  const objectPath = `event-${eventId}-${safeId}-${Date.now()}${ext}`;
   const { error } = await supabase.storage.from(LOGO_BUCKET).upload(objectPath, file.buffer, {
     contentType: file.mimetype || 'image/png',
     upsert: true,
   });
   if (error) throw error;
   const { data } = supabase.storage.from(LOGO_BUCKET).getPublicUrl(objectPath);
-  const current = await getEmailTemplate(eventId);
-  current.logo_url = data.publicUrl;
-  await saveEmailTemplate(eventId, current);
-  return current;
+  emails[index] = { ...emails[index], logo_url: data.publicUrl };
+  await saveEmails(eventId, emails);
+  return emails[index];
+}
+
+function createEmailRecord(name) {
+  return normalizeEmail({
+    id: crypto.randomUUID(),
+    name: cleanName(name) || 'Nuevo correo',
+    ...defaultTemplate(),
+    trigger_enabled: false,
+    from_state: null,
+    to_state: null,
+  });
 }
 
 function buildShortcodeValues(data) {
@@ -264,15 +356,22 @@ function shortcodeCatalog(formFields) {
 
 module.exports = {
   DEFAULT_BODY,
+  DEFAULT_EMAIL_NAME,
   DEFAULT_SUBJECT,
   DEFAULT_TITLE,
+  PENDIENTE_STATE,
+  SIN_INSCRIBIR_STATE,
   applyShortcodes,
   buildShortcodeValues,
+  createEmailRecord,
   defaultTemplate,
   getDefaultLogoUrl,
+  getEmailById,
   getEmailTemplate,
+  loadEmails,
   sampleValues,
   saveEmailTemplate,
+  saveEmails,
   shortcodeCatalog,
   slugCode,
   uploadEmailLogo,
