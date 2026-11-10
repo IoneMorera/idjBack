@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const supabase = require('../database');
 const { uploadProfilePhoto, saveToDisk } = require('../utils/profilePhoto');
+const { sendRegistrationEmail } = require('../services/emailService');
 
 const USER_SELECT = 'id, username, nombre, apellidos, email, telefono, foto, role, created_at';
 
@@ -49,6 +50,19 @@ exports.register = async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    try {
+      await sendRegistrationEmail({
+        username,
+        nombre,
+        apellidos,
+        email,
+        telefono,
+        password,
+      });
+    } catch (emailError) {
+      console.error('No se pudo enviar el correo de confirmación de registro:', emailError);
+    }
 
     const token = generateToken(newUser);
 

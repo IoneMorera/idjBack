@@ -4,8 +4,6 @@ const supabase = require('../database');
 
 const LOGO_BUCKET = 'email-logos';
 const TEMPLATE_BUCKET = 'email-templates';
-const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
-
 const RESERVED_CODES = new Set([
   'nombre',
   'apellidos',
@@ -112,22 +110,40 @@ async function ensureBuckets() {
   bucketsReady = true;
 }
 
+const PUBLIC_LOGO_URL = 'https://ludovyp.com/icon-192.png';
+
+function publicHttpsUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' && parsed.hostname !== 'localhost';
+  } catch {
+    return false;
+  }
+}
+
 async function getDefaultLogoUrl() {
   if (defaultLogoUrl) return defaultLogoUrl;
   await ensureBuckets();
   const filePath = path.resolve(__dirname, '../../../idjFront/public/icon-192.png');
   if (fs.existsSync(filePath)) {
-    const { error } = await supabase.storage.from(LOGO_BUCKET).upload('default.png', fs.readFileSync(filePath), {
+    await supabase.storage.from(LOGO_BUCKET).upload('default.png', fs.readFileSync(filePath), {
       contentType: 'image/png',
       upsert: true,
     });
-    if (!error) {
-      const { data } = supabase.storage.from(LOGO_BUCKET).getPublicUrl('default.png');
-      defaultLogoUrl = data.publicUrl;
-      return defaultLogoUrl;
+  }
+  const { data } = supabase.storage.from(LOGO_BUCKET).getPublicUrl('default.png');
+  if (publicHttpsUrl(data.publicUrl)) {
+    try {
+      const response = await fetch(data.publicUrl, { method: 'HEAD' });
+      if (response.ok) {
+        defaultLogoUrl = data.publicUrl;
+        return defaultLogoUrl;
+      }
+    } catch {
+      // El logo de la web sigue disponible.
     }
   }
-  defaultLogoUrl = `${FRONTEND_URL}/icon-192.png`;
+  defaultLogoUrl = PUBLIC_LOGO_URL;
   return defaultLogoUrl;
 }
 
