@@ -5,20 +5,26 @@ const {
   DEFAULT_BODY,
   DEFAULT_SUBJECT,
   DEFAULT_TITLE,
-  applyShortcodes,
+  createEmailRecord,
   getDefaultLogoUrl,
-  getEmailTemplate,
+  getEmailById,
+  loadEmails,
   sampleValues,
-  saveEmailTemplate,
+  saveEmails,
   shortcodeCatalog,
   uploadEmailLogo,
 } = require('../utils/emailTemplate');
-const { renderUserInscriptionEmail } = require('../services/emailService');
+const { renderUserInscriptionEmail, sendStoredTemplate } = require('../services/emailService');
 
 function cleanText(value, max) {
   const text = String(value ?? '').replace(/\r\n/g, '\n').trim();
   if (!text) return '';
   return text.slice(0, max);
+}
+
+function cleanState(value) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return text || null;
 }
 
 async function loadFormFields(eventId) {
@@ -52,29 +58,125 @@ async function loadEvent(eventId) {
   return data;
 }
 
-async function present(eventId) {
-  const [event, template, fields, defaultLogo] = await Promise.all([
+function summarize(email) {
+  return {
+    id: email.id,
+    name: email.name,
+    subject: email.subject,
+    trigger_enabled: email.trigger_enabled,
+    from_state: email.from_state,
+    to_state: email.to_state,
+  };
+}
+
+async function presentEmail(eventId, email) {
+  const [event, fields, defaultLogo] = await Promise.all([
     loadEvent(eventId),
-    getEmailTemplate(eventId),
     loadFormFields(eventId),
     getDefaultLogoUrl(),
   ]);
-  if (!event) return null;
+  if (!event || !email) return null;
   return {
     event,
     template: {
-      ...template,
-      logo_url: template.logo_url || null,
+      ...email,
+      logo_url: email.logo_url || null,
     },
     default_logo_url: defaultLogo,
     shortcodes: shortcodeCatalog(fields),
   };
 }
 
+async function knownStateNames(names) {
+  const unique = [...new Set(names.filter(Boolean))];
+  if (unique.length === 0) return new Set();
+  const { data, error } = await supabase
+    .from('inscription_states')
+    .select('nombre')
+    .in('nombre', unique);
+  if (error) throw error;
+  return new Set((data || []).map((state) => state.nombre));
+}
+
+function formatPrice(value) {
+  return new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(Number(value));
+}
+
+async function camposForInscription(eventId, inscriptionId) {
+  const fields = await loadFormFields(eventId);
+  if (!inscriptionId) return fields.map((field) => ({ label: field.label, value: '' }));
+  const { data, error } = await supabase
+    .from('inscription_field_values')
+    .select('field_id, value')
+    .eq('inscription_id', inscriptionId);
+  if (error) throw error;
+  const byField = Object.fromEntries((data || []).map((row) => [row.field_id, row.value]));
+  return fields.map((field) => ({ label: field.label, value: byField[field.id] ?? '' }));
+}
+
+exports.listTemplates = async (req, res) => {
+  try {
+    const event = await loadEvent(req.params.eventId);
+    if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
+    const [emails, statesResult] = await Promise.all([
+      loadEmails(req.params.eventId),
+      supabase.from('inscription_states').select('id, nombre').order('id'),
+    ]);
+    if (statesResult.error) throw statesResult.error;
+    res.json({
+      event,
+      emails: emails.map(summarize),
+      states: statesResult.data || [],
+    });
+  } catch (error) {
+    console.error('Error al listar correos:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
+exports.createTemplate = async (req, res) => {
+  try {
+    const event = await loadEvent(req.params.eventId);
+    if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
+    const emails = await loadEmails(req.params.eventId);
+    const name = cleanText(req.body.name, 80);
+    if (!name) {
+      return res.status(400).json({ message: 'El nombre del correo es obligatorio' });
+    }
+    if (emails.some((email) => email.name.toLowerCase() === name.toLowerCase())) {
+      return res.status(400).json({ message: 'Ya hay un correo con ese nombre' });
+    }
+    const created = createEmailRecord(name);
+    emails.push(created);
+    await saveEmails(req.params.eventId, emails);
+    res.status(201).json({ message: 'Correo creado', email: summarize(created) });
+  } catch (error) {
+    console.error('Error al crear el correo:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
+exports.deleteTemplate = async (req, res) => {
+  try {
+    const event = await loadEvent(req.params.eventId);
+    if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
+    const emails = await loadEmails(req.params.eventId);
+    const index = emails.findIndex((email) => email.id === String(req.params.emailId));
+    if (index < 0) return res.status(404).json({ message: 'Correo no encontrado' });
+    emails.splice(index, 1);
+    await saveEmails(req.params.eventId, emails);
+    res.json({ message: 'Correo eliminado' });
+  } catch (error) {
+    console.error('Error al eliminar el correo:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
 exports.getTemplate = async (req, res) => {
   try {
-    const payload = await present(req.params.eventId);
-    if (!payload) return res.status(404).json({ message: 'Evento no encontrado' });
+    const email = await getEmailById(req.params.eventId, req.params.emailId);
+    const payload = await presentEmail(req.params.eventId, email);
+    if (!payload) return res.status(404).json({ message: email ? 'Evento no encontrado' : 'Correo no encontrado' });
     res.json(payload);
   } catch (error) {
     console.error('Error al obtener la plantilla de correo:', error);
@@ -87,24 +189,65 @@ exports.updateTemplate = async (req, res) => {
     const event = await loadEvent(req.params.eventId);
     if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
 
+    const name = cleanText(req.body.name, 80);
     const title = cleanText(req.body.title, 80);
     const subject = cleanText(req.body.subject, 180);
     const body = cleanText(req.body.body, 8000);
-    if (!title || !subject || !body) {
-      return res.status(400).json({ message: 'El título, el asunto y el cuerpo son obligatorios' });
+    if (!name || !title || !subject || !body) {
+      return res.status(400).json({ message: 'El nombre, el título, el asunto y el cuerpo son obligatorios' });
     }
 
-    const current = await getEmailTemplate(req.params.eventId);
-    await saveEmailTemplate(req.params.eventId, {
+    const emails = await loadEmails(req.params.eventId);
+    const index = emails.findIndex((email) => email.id === String(req.params.emailId));
+    if (index < 0) return res.status(404).json({ message: 'Correo no encontrado' });
+    emails[index] = {
+      ...emails[index],
+      name,
       title,
       subject,
       body,
-      logo_url: current.logo_url,
-    });
-    const payload = await present(req.params.eventId);
+    };
+    await saveEmails(req.params.eventId, emails);
+    const payload = await presentEmail(req.params.eventId, emails[index]);
     res.json({ message: 'Correo guardado', ...payload });
   } catch (error) {
     console.error('Error al guardar la plantilla de correo:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
+exports.updateTrigger = async (req, res) => {
+  try {
+    const event = await loadEvent(req.params.eventId);
+    if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
+
+    const emails = await loadEmails(req.params.eventId);
+    const index = emails.findIndex((email) => email.id === String(req.params.emailId));
+    if (index < 0) return res.status(404).json({ message: 'Correo no encontrado' });
+
+    const triggerEnabled = req.body.trigger_enabled === true;
+    const fromState = cleanState(req.body.from_state);
+    const toState = cleanState(req.body.to_state);
+    if (triggerEnabled && fromState && toState && fromState === toState) {
+      return res.status(400).json({ message: 'El estado de origen y el de destino tienen que ser distintos' });
+    }
+    if (fromState || toState) {
+      const known = await knownStateNames([fromState, toState]);
+      if ((fromState && !known.has(fromState)) || (toState && !known.has(toState))) {
+        return res.status(400).json({ message: 'Estado no válido' });
+      }
+    }
+
+    emails[index] = {
+      ...emails[index],
+      trigger_enabled: triggerEnabled,
+      from_state: fromState,
+      to_state: toState,
+    };
+    await saveEmails(req.params.eventId, emails);
+    res.json({ message: 'Asociación actualizada', email: summarize(emails[index]) });
+  } catch (error) {
+    console.error('Error al asociar el correo a un estado:', error);
     res.status(500).json({ message: 'Error interno del servidor' });
   }
 };
@@ -114,12 +257,13 @@ exports.uploadLogo = async (req, res) => {
     if (!req.file) return res.status(400).json({ message: 'Selecciona una imagen' });
     const event = await loadEvent(req.params.eventId);
     if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
-    await uploadEmailLogo(req.params.eventId, req.file);
-    const payload = await present(req.params.eventId);
+    const email = await uploadEmailLogo(req.params.eventId, req.params.emailId, req.file);
+    const payload = await presentEmail(req.params.eventId, email);
     res.json({ message: 'Logotipo actualizado', ...payload });
   } catch (error) {
     console.error('Error al subir el logotipo:', error);
-    res.status(500).json({ message: error.message || 'Error al subir el logotipo' });
+    const status = error.status || 500;
+    res.status(status).json({ message: error.message || 'Error al subir el logotipo' });
   }
 };
 
@@ -127,9 +271,12 @@ exports.resetLogo = async (req, res) => {
   try {
     const event = await loadEvent(req.params.eventId);
     if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
-    const current = await getEmailTemplate(req.params.eventId);
-    await saveEmailTemplate(req.params.eventId, { ...current, logo_url: null });
-    const payload = await present(req.params.eventId);
+    const emails = await loadEmails(req.params.eventId);
+    const index = emails.findIndex((email) => email.id === String(req.params.emailId));
+    if (index < 0) return res.status(404).json({ message: 'Correo no encontrado' });
+    emails[index] = { ...emails[index], logo_url: null };
+    await saveEmails(req.params.eventId, emails);
+    const payload = await presentEmail(req.params.eventId, emails[index]);
     res.json({ message: 'Logotipo de la web restaurado', ...payload });
   } catch (error) {
     console.error('Error al restaurar el logotipo:', error);
@@ -141,14 +288,15 @@ exports.preview = async (req, res) => {
   try {
     const event = await loadEvent(req.params.eventId);
     if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
+    const email = await getEmailById(req.params.eventId, req.params.emailId);
+    if (!email) return res.status(404).json({ message: 'Correo no encontrado' });
     const fields = await loadFormFields(req.params.eventId);
     const values = sampleValues(event, fields);
-    const current = await getEmailTemplate(req.params.eventId);
     const defaultLogo = await getDefaultLogoUrl();
     const title = cleanText(req.body.title, 80) || DEFAULT_TITLE;
     const subject = cleanText(req.body.subject, 180) || DEFAULT_SUBJECT;
     const body = cleanText(req.body.body, 8000) || DEFAULT_BODY;
-    const logoUrl = req.body.logo_url || current.logo_url || defaultLogo;
+    const logoUrl = req.body.logo_url || email.logo_url || defaultLogo;
     const rendered = renderUserInscriptionEmail({ title, subject, body, logoUrl, values });
     res.json(rendered);
   } catch (error) {
@@ -161,17 +309,107 @@ exports.restoreDefault = async (req, res) => {
   try {
     const event = await loadEvent(req.params.eventId);
     if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
-    const current = await getEmailTemplate(req.params.eventId);
-    await saveEmailTemplate(req.params.eventId, {
+    const emails = await loadEmails(req.params.eventId);
+    const index = emails.findIndex((email) => email.id === String(req.params.emailId));
+    if (index < 0) return res.status(404).json({ message: 'Correo no encontrado' });
+    emails[index] = {
+      ...emails[index],
       title: DEFAULT_TITLE,
       subject: DEFAULT_SUBJECT,
       body: DEFAULT_BODY,
-      logo_url: current.logo_url,
-    });
-    const payload = await present(req.params.eventId);
+    };
+    await saveEmails(req.params.eventId, emails);
+    const payload = await presentEmail(req.params.eventId, emails[index]);
     res.json({ message: 'Texto original restaurado', ...payload });
   } catch (error) {
     console.error('Error al restaurar el correo:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
+exports.sendTemplate = async (req, res) => {
+  try {
+    const event = await loadEvent(req.params.eventId);
+    if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
+    const email = await getEmailById(req.params.eventId, req.params.emailId);
+    if (!email) return res.status(404).json({ message: 'Correo no encontrado' });
+
+    const userIds = [...new Set(
+      (Array.isArray(req.body.user_ids) ? req.body.user_ids : [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isInteger(id) && id > 0),
+    )];
+    if (userIds.length === 0) {
+      return res.status(400).json({ message: 'Selecciona al menos un usuario' });
+    }
+    if (userIds.length > 200) {
+      return res.status(400).json({ message: 'Puedes enviar el correo a 200 usuarios como máximo cada vez' });
+    }
+
+    const [{ data: users, error: usersError }, { data: inscriptions, error: inscriptionsError }] = await Promise.all([
+      supabase.from('users').select('id, username, nombre, apellidos, email, telefono').in('id', userIds),
+      supabase
+        .from('inscriptions')
+        .select('*, inscription_states ( nombre ), event_tariffs ( nombre, precio_total )')
+        .eq('event_id', event.id)
+        .in('user_id', userIds),
+    ]);
+    if (usersError) throw usersError;
+    if (inscriptionsError) throw inscriptionsError;
+
+    const inscriptionByUser = new Map((inscriptions || []).map((row) => [row.user_id, row]));
+    const eventName = `${event.nombre} - ${event.mes} ${event.anio}`;
+    let sent = 0;
+    const failed = [];
+
+    for (const user of users || []) {
+      if (!user.email) {
+        failed.push({ user_id: user.id, message: 'El usuario no tiene correo' });
+        continue;
+      }
+      const inscription = inscriptionByUser.get(user.id);
+      try {
+        const campos = await camposForInscription(event.id, inscription?.id);
+        const tarifa = inscription?.event_tariffs?.nombre || '';
+        const precio = inscription?.event_tariffs?.precio_total != null
+          ? formatPrice(inscription.event_tariffs.precio_total)
+          : '';
+        await sendStoredTemplate(email, {
+          eventId: event.id,
+          email: inscription?.email || user.email,
+          nombre: inscription?.nombre || user.nombre,
+          apellidos: inscription?.apellidos || user.apellidos,
+          telefono: inscription?.telefono || user.telefono,
+          dni: inscription?.dni || '',
+          usuario: user.username,
+          eventName,
+          mes: event.mes,
+          anio: event.anio,
+          estado: inscription?.inscription_states?.nombre || 'Sin inscribir',
+          tarifa,
+          precio,
+          campos,
+        });
+        sent += 1;
+      } catch (sendError) {
+        console.error(`Error al enviar el correo a ${user.email}:`, sendError);
+        failed.push({ user_id: user.id, email: user.email, message: 'No se pudo enviar' });
+      }
+    }
+
+    const missing = userIds.filter((id) => !(users || []).some((user) => user.id === id));
+    for (const id of missing) failed.push({ user_id: id, message: 'Usuario no encontrado' });
+
+    if (sent === 0) {
+      return res.status(502).json({ message: 'No se pudo enviar el correo', sent, failed });
+    }
+    res.json({
+      message: failed.length ? `Enviado a ${sent} usuarios. ${failed.length} no se pudieron enviar.` : `Correo enviado a ${sent} usuarios`,
+      sent,
+      failed,
+    });
+  } catch (error) {
+    console.error('Error al enviar el correo:', error);
     res.status(500).json({ message: 'Error interno del servidor' });
   }
 };

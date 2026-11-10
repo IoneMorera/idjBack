@@ -18,11 +18,16 @@ const upload = multer({
 });
 
 router.use(authMiddleware, adminMiddleware);
-router.get('/', controller.getTemplate);
-router.put('/', controller.updateTemplate);
-router.post('/preview', controller.preview);
-router.post('/restore', controller.restoreDefault);
-router.post('/logo', upload.single('logo'), controller.uploadLogo);
-router.delete('/logo', controller.resetLogo);
+router.get('/', controller.listTemplates);
+router.post('/', controller.createTemplate);
+router.get('/:emailId', controller.getTemplate);
+router.put('/:emailId', controller.updateTemplate);
+router.patch('/:emailId', controller.updateTrigger);
+router.post('/:emailId/preview', controller.preview);
+router.post('/:emailId/restore', controller.restoreDefault);
+router.post('/:emailId/logo', upload.single('logo'), controller.uploadLogo);
+router.delete('/:emailId/logo', controller.resetLogo);
+router.post('/:emailId/send', controller.sendTemplate);
+router.delete('/:emailId', controller.deleteTemplate);
 
 module.exports = router;

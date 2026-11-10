@@ -1,5 +1,5 @@
 const supabase = require('../database');
-const { sendInscriptionEmails } = require('../services/emailService');
+const { sendEmailsForTransition, sendInscriptionEmails } = require('../services/emailService');
 const { HOTEL_PAYMENT_BLOCK, HOTEL_PAYMENT_LABEL, pagoHotelFromValues, setHotelPayment } = require('../utils/hotelPayment');
 const {
   FIRST_PAYMENT_LABEL,
@@ -72,6 +72,48 @@ async function inscriptionFormFields(eventId, dynamicFields) {
   }
 
   return campos;
+}
+
+async function camposFromStored(eventId, inscriptionId) {
+  const { data, error } = await supabase
+    .from('inscription_field_values')
+    .select('field_id, value')
+    .eq('inscription_id', inscriptionId);
+  if (error) throw error;
+  const answers = {};
+  for (const row of data || []) answers[row.field_id] = row.value;
+  return inscriptionFormFields(eventId, answers);
+}
+
+async function sendStateChangeEmail(current, nextState) {
+  const event = current.events || {};
+  let campos = [];
+  try {
+    campos = await camposFromStored(current.event_id, current.id);
+  } catch (formError) {
+    console.error('No se pudieron leer los campos para el correo:', formError.message);
+  }
+  await sendEmailsForTransition(
+    current.event_id,
+    current.inscription_states?.nombre,
+    nextState,
+    {
+      eventId: current.event_id,
+      email: current.email,
+      nombre: current.nombre,
+      apellidos: current.apellidos,
+      telefono: current.telefono,
+      dni: current.dni,
+      usuario: current.users?.username,
+      eventName: event.nombre ? `${event.nombre} - ${event.mes} ${event.anio}` : '',
+      mes: event.mes,
+      anio: event.anio,
+      estado: nextState,
+      tarifa: current.event_tariffs?.nombre || '',
+      precio: current.event_tariffs?.precio_total != null ? formatPrice(current.event_tariffs.precio_total) : '',
+      campos,
+    },
+  );
 }
 
 exports.getInscriptionStates = async (req, res) => {
@@ -390,10 +432,26 @@ exports.updateInscriptionState = async (req, res) => {
     const { stateId } = req.body;
 
     const { data: state } = await supabase
-      .from('inscription_states').select('id').eq('id', stateId).maybeSingle();
+      .from('inscription_states').select('id, nombre').eq('id', stateId).maybeSingle();
     if (!state) {
       return res.status(400).json({ message: 'Estado no válido' });
     }
+
+    const { data: current, error: currentError } = await supabase
+      .from('inscriptions')
+      .select(`
+        *,
+        inscription_states ( nombre ),
+        events ( id, nombre, mes, anio ),
+        users ( username ),
+        event_tariffs ( id, nombre, precio_total )
+      `)
+      .eq('id', id)
+      .maybeSingle();
+    if (currentError) throw currentError;
+    if (!current) return res.status(404).json({ message: 'Inscripción no encontrada' });
+
+    const previousState = current.inscription_states?.nombre || null;
 
     const { data: updated, error } = await supabase
       .from('inscriptions')
@@ -422,6 +480,12 @@ exports.updateInscriptionState = async (req, res) => {
     delete flat.users;
 
     res.json({ message: 'Estado de inscripción actualizado', inscription: flat });
+
+    if (previousState && state.nombre && previousState !== state.nombre) {
+      void sendStateChangeEmail(current, state.nombre).catch((emailError) => {
+        console.error('Error al enviar correos por cambio de estado:', emailError);
+      });
+    }
   } catch (error) {
     console.error('Error al actualizar estado:', error);
     res.status(500).json({ message: 'Error interno del servidor' });
