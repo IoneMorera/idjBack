@@ -229,6 +229,7 @@ exports.getMyOrders = async (req, res) => {
 
     if (error) throw error;
 
+    const purchasedIds = await fetchPurchasedDishIds(eventId);
     const orders = (items || []).map((row) => ({
       id: row.id,
       day: row.day,
@@ -236,6 +237,7 @@ exports.getMyOrders = async (req, res) => {
       quantity: row.quantity,
       created_at: row.created_at,
       updated_at: row.updated_at,
+      locked: purchasedIds.has(Number(row.event_food_dishes?.id)),
       dish: row.event_food_dishes,
     }));
 
@@ -277,6 +279,22 @@ exports.upsertOrder = async (req, res) => {
       return res.status(404).json({ message: 'Plato no encontrado en el catálogo del evento' });
     }
 
+    const purchasedIds = await fetchPurchasedDishIds(eventId);
+    if (purchasedIds.has(Number(dishId))) {
+      const { data: current } = await supabase
+        .from('event_food_order_items')
+        .select('quantity')
+        .eq('event_id', eventId)
+        .eq('user_id', req.user.id)
+        .eq('dish_id', dishId)
+        .eq('day', day)
+        .eq('meal', meal)
+        .maybeSingle();
+      if (current && qty < current.quantity) {
+        return res.status(409).json({ message: 'Este plato ya se ha pedido y no se puede quitar' });
+      }
+    }
+
     const { data: item, error } = await supabase
       .from('event_food_order_items')
       .upsert(
@@ -305,6 +323,7 @@ exports.upsertOrder = async (req, res) => {
         day: item.day,
         meal: item.meal,
         quantity: item.quantity,
+        locked: purchasedIds.has(Number(dishId)),
         dish: item.event_food_dishes,
       },
     });
@@ -324,7 +343,7 @@ exports.deleteOrderItem = async (req, res) => {
 
     const { data: item } = await supabase
       .from('event_food_order_items')
-      .select('id, user_id')
+      .select('id, user_id, dish_id')
       .eq('id', itemId)
       .eq('event_id', eventId)
       .maybeSingle();
@@ -332,6 +351,11 @@ exports.deleteOrderItem = async (req, res) => {
     if (!item) return res.status(404).json({ message: 'Línea de pedido no encontrada' });
     if (item.user_id !== req.user.id && !isStaff(req.user)) {
       return res.status(403).json({ message: 'No puedes eliminar este pedido' });
+    }
+
+    const purchasedIds = await fetchPurchasedDishIds(eventId);
+    if (purchasedIds.has(Number(item.dish_id))) {
+      return res.status(409).json({ message: 'Este plato ya se ha pedido y no se puede eliminar' });
     }
 
     const { error } = await supabase.from('event_food_order_items').delete().eq('id', itemId);
@@ -342,6 +366,63 @@ exports.deleteOrderItem = async (req, res) => {
     const status = error.status || 500;
     if (status >= 500) console.error('Error al eliminar pedido:', error);
     res.status(status).json({ message: error.message || 'Error interno del servidor' });
+  }
+};
+
+async function fetchPurchasedDishIds(eventId) {
+  const { data, error } = await supabase
+    .from('event_food_purchased_dishes')
+    .select('dish_id')
+    .eq('event_id', eventId);
+  if (error) {
+    if (isMissingSchema(error)) return new Set();
+    throw error;
+  }
+  return new Set((data || []).map((row) => Number(row.dish_id)));
+}
+
+exports.markPurchasedDishes = async (req, res) => {
+  try {
+    const eventId = Number(req.params.eventId);
+    const names = Array.isArray(req.body?.names)
+      ? req.body.names.map((name) => String(name || '').trim()).filter(Boolean)
+      : [];
+    if (!Number.isInteger(eventId) || names.length === 0) {
+      return res.status(400).json({ message: 'Indica los platos que se han pedido' });
+    }
+
+    const event = await getEventById(eventId);
+    if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
+
+    const wanted = new Set(names.map((name) => name.toLowerCase()));
+    const { data: dishes, error: dishError } = await supabase
+      .from('event_food_dishes')
+      .select('id, name')
+      .eq('event_id', eventId);
+    if (dishError) throw dishError;
+
+    const rows = (dishes || [])
+      .filter((dish) => wanted.has(String(dish.name || '').trim().toLowerCase()))
+      .map((dish) => ({ event_id: eventId, dish_id: dish.id }));
+
+    if (!rows.length) {
+      return res.json({ purchased: 0 });
+    }
+
+    const { error } = await supabase
+      .from('event_food_purchased_dishes')
+      .upsert(rows, { onConflict: 'event_id,dish_id' });
+    if (error) {
+      if (isMissingSchema(error)) {
+        return res.status(503).json({ message: 'Falta aplicar la migración de platos pedidos' });
+      }
+      throw error;
+    }
+
+    res.json({ purchased: rows.length });
+  } catch (error) {
+    console.error('Error al marcar platos pedidos:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
   }
 };
 
