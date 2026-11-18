@@ -11,6 +11,7 @@ router.post('/event/:eventId', authMiddleware, inscriptionController.createInscr
 // Admin
 router.get('/', authMiddleware, adminMiddleware, inscriptionController.getAllInscriptions);
 router.patch('/:id/state', authMiddleware, adminMiddleware, inscriptionController.updateInscriptionState);
+router.patch('/:id/tariff', authMiddleware, adminMiddleware, inscriptionController.updateInscriptionTariff);
 router.patch('/:id/hotel-payment', authMiddleware, adminMiddleware, inscriptionController.updateHotelPayment);
 router.patch('/:id/primer-pago', authMiddleware, adminMiddleware, inscriptionController.updateFirstPayment);
 

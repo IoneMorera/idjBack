@@ -28,10 +28,8 @@ async function ensureBucket() {
   bucketReady = true;
 }
 
-async function uploadProfilePhoto(userId, file) {
+async function uploadToBucket(objectPath, file) {
   await ensureBucket();
-  const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg';
-  const objectPath = `${userId}/${Date.now()}${ext}`;
   const { error } = await supabase.storage.from(BUCKET).upload(objectPath, file.buffer, {
     contentType: file.mimetype || 'image/jpeg',
     upsert: true,
@@ -39,6 +37,16 @@ async function uploadProfilePhoto(userId, file) {
   if (error) throw error;
   const { data } = supabase.storage.from(BUCKET).getPublicUrl(objectPath);
   return data.publicUrl;
+}
+
+async function uploadProfilePhoto(userId, file) {
+  const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg';
+  return uploadToBucket(`${userId}/${Date.now()}${ext}`, file);
+}
+
+async function uploadEventLogo(eventId, file) {
+  const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg';
+  return uploadToBucket(`events/${eventId}/logo-${Date.now()}${ext}`, file);
 }
 
 function saveToDisk(userId, file) {
@@ -67,6 +75,7 @@ function missingUploadRedirectUrl(req) {
 
 module.exports = {
   uploadProfilePhoto,
+  uploadEventLogo,
   saveToDisk,
   shouldRedirectMissingUpload,
   missingUploadRedirectUrl,

@@ -1,4 +1,5 @@
 const supabase = require('../database');
+const { isStaff } = require('./access');
 
 const VALID_DAYS = ['jueves', 'viernes', 'sabado', 'domingo'];
 const VALID_MEALS = ['comida', 'cena'];
@@ -35,7 +36,7 @@ function isInscrito(inscription) {
   return inscription?.estado_nombre === 'Inscrito';
 }
 
-async function assertFoodOrderingEnabled(eventId) {
+async function assertFoodOrderingEnabled(eventId, user) {
   const event = await getEventById(eventId);
   if (!event) {
     const err = new Error('Evento no encontrado');
@@ -47,12 +48,22 @@ async function assertFoodOrderingEnabled(eventId) {
     err.status = 403;
     throw err;
   }
+  if (event.food_en_pruebas && !isStaff(user)) {
+    const err = new Error('El pedido de comida está en pruebas');
+    err.status = 403;
+    throw err;
+  }
+  if ((event.hidden || event.en_pruebas) && !isStaff(user)) {
+    const err = new Error('Evento no encontrado');
+    err.status = 404;
+    throw err;
+  }
   return event;
 }
 
-async function assertUserCanOrderFood(userId, eventId) {
-  await assertFoodOrderingEnabled(eventId);
-  const inscription = await getUserInscription(userId, eventId);
+async function assertUserCanOrderFood(user, eventId) {
+  await assertFoodOrderingEnabled(eventId, user);
+  const inscription = await getUserInscription(user.id, eventId);
   if (!isInscrito(inscription)) {
     const err = new Error('Debes estar inscrito con estado Inscrito para pedir comida');
     err.status = 403;
