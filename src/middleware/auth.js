@@ -19,7 +19,7 @@ function authMiddleware(req, res, next) {
 }
 
 function adminMiddleware(req, res, next) {
-  if (req.user.role !== 'administrador') {
+  if (req.user.role !== 'administrador' && req.user.role !== 'desarrollador') {
     return res.status(403).json({ message: 'Acceso denegado. Se requiere rol de administrador' });
   }
   next();

@@ -1,8 +1,16 @@
 const supabase = require('../database');
 const { inscriptionCounts, inscriptionCountsForEvents, withAvailability } = require('../utils/inscriptionWindow');
+const { uploadEventLogo, saveToDisk } = require('../utils/profilePhoto');
+const { isStaff, maskTesting } = require('../utils/access');
 
 function schemaErrorMessage(error, fallback) {
   const message = `${error?.message || ''} ${error?.details || ''}`;
+  if (/en_pruebas/i.test(message)) {
+    return 'Falta aplicar la migración 007_developer_role.sql en Supabase';
+  }
+  if (/bgg_username|games_enabled|snacks_enabled|logo_url|event_rooms|event_games|event_snack/i.test(message)) {
+    return 'Falta aplicar la migración 006_rooms_games_snacks.sql en Supabase';
+  }
   if (/does not exist|schema cache|inscription_starts_at|max_inscriptions/i.test(message)) {
     return 'Falta aplicar la migración 005_inscription_window.sql en Supabase';
   }
@@ -36,8 +44,8 @@ exports.getAllEvents = async (req, res) => {
 
     if (error) throw error;
 
-    const isAdmin = req.user?.role === 'administrador';
-    const visible = (events || []).filter((event) => isAdmin || !event.hidden);
+    const staff = isStaff(req.user);
+    const visible = (events || []).filter((event) => staff || (!event.hidden && !event.en_pruebas));
 
     const [inscriptionsResult, countsByEvent] = await Promise.all([
       req.user?.id
@@ -46,7 +54,7 @@ exports.getAllEvents = async (req, res) => {
           .select('event_id, inscription_states ( nombre )')
           .eq('user_id', req.user.id)
         : Promise.resolve({ data: [] }),
-      isAdmin
+      staff
         ? inscriptionCountsForEvents(visible.map((event) => event.id))
         : Promise.resolve({}),
     ]);
@@ -57,12 +65,12 @@ exports.getAllEvents = async (req, res) => {
       (inscriptionsResult.data || []).map((row) => [row.event_id, row.inscription_states?.nombre || null]),
     );
     const withState = visible.map((event) => {
-      const presented = {
+      const presented = maskTesting({
         ...withAvailability(event),
-        ...(isAdmin ? countsByEvent[event.id] : {}),
+        ...(staff ? countsByEvent[event.id] : {}),
         mi_estado: stateByEvent[event.id] || 'Sin inscribir',
-      };
-      if (!isAdmin) delete presented.max_inscriptions;
+      }, req.user);
+      if (!staff) delete presented.max_inscriptions;
       return presented;
     });
 
@@ -84,13 +92,13 @@ exports.getEventById = async (req, res) => {
     if (error) throw error;
     if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
 
-    const isAdmin = req.user?.role === 'administrador';
-    if (event.hidden && !isAdmin) {
+    const staff = isStaff(req.user);
+    if ((event.hidden || event.en_pruebas) && !staff) {
       return res.status(404).json({ message: 'Evento no encontrado' });
     }
 
-    const presented = await presentEvent(event, { counts: isAdmin });
-    if (!isAdmin) delete presented.max_inscriptions;
+    const presented = maskTesting(await presentEvent(event, { counts: staff }), req.user);
+    if (!staff) delete presented.max_inscriptions;
     res.json({ event: presented });
   } catch (error) {
     console.error('Error al obtener evento:', error);
@@ -166,6 +174,15 @@ exports.updateEventSettings = async (req, res) => {
       patch.hidden = req.body.hidden;
     }
 
+    for (const field of ['en_pruebas', 'inscription_en_pruebas', 'food_en_pruebas', 'games_en_pruebas', 'snacks_en_pruebas']) {
+      if (field in req.body) {
+        if (typeof req.body[field] !== 'boolean') {
+          return res.status(400).json({ message: 'En pruebas tiene que ser sí o no' });
+        }
+        patch[field] = req.body[field];
+      }
+    }
+
     if ('max_inscriptions' in req.body) {
       const raw = req.body.max_inscriptions;
       if (raw === null || raw === '') {
@@ -221,6 +238,32 @@ exports.updateEventSettings = async (req, res) => {
   } catch (error) {
     console.error('Error al actualizar evento:', error);
     res.status(500).json({ message: schemaErrorMessage(error, 'Error interno del servidor') });
+  }
+};
+
+exports.uploadLogo = async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'No se ha proporcionado una imagen' });
+    const eventId = req.params.id;
+    let logoUrl;
+    try {
+      logoUrl = await uploadEventLogo(eventId, req.file);
+    } catch (storageError) {
+      console.error('No se pudo subir el logo a Storage, se guarda en disco:', storageError);
+      logoUrl = saveToDisk(`event-${eventId}`, req.file);
+    }
+    const { data: event, error } = await supabase
+      .from('events')
+      .update({ logo_url: logoUrl })
+      .eq('id', eventId)
+      .select()
+      .maybeSingle();
+    if (error) throw error;
+    if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
+    res.json({ message: 'Logotipo del evento actualizado', event: await presentEvent(event, { counts: true }) });
+  } catch (error) {
+    console.error('Error al subir el logotipo del evento:', error);
+    res.status(500).json({ message: schemaErrorMessage(error, 'Error al subir el logotipo') });
   }
 };
 

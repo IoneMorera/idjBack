@@ -5,6 +5,18 @@ const { uploadProfilePhoto, saveToDisk } = require('../utils/profilePhoto');
 const { sendRegistrationEmail } = require('../services/emailService');
 
 const USER_SELECT = 'id, username, nombre, apellidos, email, telefono, foto, role, created_at';
+const USER_SELECT_WITH_BGG = `${USER_SELECT}, bgg_username`;
+
+function missingBggColumn(error) {
+  const message = `${error?.message || ''} ${error?.details || ''}`;
+  return /bgg_username/i.test(message) && /does not exist|schema cache|Could not find/i.test(message);
+}
+
+async function readUser(userId) {
+  const withBgg = await supabase.from('users').select(USER_SELECT_WITH_BGG).eq('id', userId).single();
+  if (!withBgg.error || !missingBggColumn(withBgg.error)) return withBgg;
+  return supabase.from('users').select(USER_SELECT).eq('id', userId).single();
+}
 
 function generateToken(user) {
   return jwt.sign(
@@ -106,8 +118,7 @@ exports.login = async (req, res) => {
 
 exports.getProfile = async (req, res) => {
   try {
-    const { data: user, error } = await supabase
-      .from('users').select(USER_SELECT).eq('id', req.user.id).single();
+    const { data: user, error } = await readUser(req.user.id);
 
     if (error) throw error;
     if (!user) return res.status(404).json({ message: 'Usuario no encontrado' });
@@ -121,18 +132,41 @@ exports.getProfile = async (req, res) => {
 
 exports.updateProfile = async (req, res) => {
   try {
-    const { nombre, apellidos, telefono } = req.body;
+    const { nombre, apellidos, telefono, bgg_username: bggUsername } = req.body;
+    const patch = { nombre, apellidos, telefono: telefono || null };
 
-    const { data: updatedUser, error } = await supabase
+    if (bggUsername !== undefined) {
+      const username = String(bggUsername || '').trim();
+      if (username && !/^[A-Za-z0-9_-]{2,50}$/.test(username)) {
+        return res.status(400).json({
+          message: 'El usuario de BoardGameGeek solo puede tener letras, números, guiones y guion bajo',
+        });
+      }
+      patch.bgg_username = username || null;
+    }
+
+    let result = await supabase
       .from('users')
-      .update({ nombre, apellidos, telefono: telefono || null })
+      .update(patch)
       .eq('id', req.user.id)
-      .select(USER_SELECT)
+      .select(USER_SELECT_WITH_BGG)
       .single();
 
-    if (error) throw error;
+    if (result.error && missingBggColumn(result.error)) {
+      if (bggUsername !== undefined) {
+        return res.status(500).json({ message: 'Falta aplicar la migración 006_rooms_games_snacks.sql en Supabase' });
+      }
+      result = await supabase
+        .from('users')
+        .update({ nombre, apellidos, telefono: telefono || null })
+        .eq('id', req.user.id)
+        .select(USER_SELECT)
+        .single();
+    }
 
-    res.json({ message: 'Perfil actualizado correctamente', user: updatedUser });
+    if (result.error) throw result.error;
+
+    res.json({ message: 'Perfil actualizado correctamente', user: result.data });
   } catch (error) {
     console.error('Error al actualizar perfil:', error);
     res.status(500).json({ message: 'Error interno del servidor' });
