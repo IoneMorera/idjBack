@@ -8,6 +8,7 @@ router.post('/resolve-ids', authMiddleware, adminMiddleware, foodController.reso
 router.get('/dishes', authMiddleware, foodController.getDishes);
 router.get('/orders/export', authMiddleware, adminMiddleware, foodController.exportOrdersCsv);
 router.get('/orders', authMiddleware, adminMiddleware, foodController.getAllOrders);
+router.put('/payments', authMiddleware, adminMiddleware, foodController.setFoodPayment);
 router.get('/orders/mine', authMiddleware, foodController.getMyOrders);
 router.post('/orders', authMiddleware, foodController.upsertOrder);
 router.delete('/orders/:itemId', authMiddleware, foodController.deleteOrderItem);

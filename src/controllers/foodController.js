@@ -6,6 +6,8 @@ const {
   assertUserCanOrderFood,
   validateDayMeal,
 } = require('../utils/foodAccess');
+const { isStaff, isDeveloper } = require('../utils/access');
+const { isMissingSchema } = require('../utils/schema');
 
 exports.setFoodOrderingEnabled = async (req, res) => {
   try {
@@ -180,10 +182,10 @@ exports.getDishes = async (req, res) => {
     const event = await getEventById(eventId);
     if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
 
-    const isAdmin = req.user.role === 'administrador';
+    const staff = isStaff(req.user);
 
-    if (!isAdmin) {
-      await assertUserCanOrderFood(req.user.id, eventId);
+    if (!staff) {
+      await assertUserCanOrderFood(req.user, eventId);
     }
 
     let query = supabase
@@ -193,7 +195,7 @@ exports.getDishes = async (req, res) => {
       .order('category')
       .order('name');
 
-    if (!isAdmin) {
+    if (!staff) {
       query = query.eq('active', true);
     }
 
@@ -211,7 +213,7 @@ exports.getDishes = async (req, res) => {
 exports.getMyOrders = async (req, res) => {
   try {
     const eventId = req.params.eventId;
-    await assertUserCanOrderFood(req.user.id, eventId);
+    await assertUserCanOrderFood(req.user, eventId);
 
     const { data: items, error } = await supabase
       .from('event_food_order_items')
@@ -248,7 +250,7 @@ exports.getMyOrders = async (req, res) => {
 exports.upsertOrder = async (req, res) => {
   try {
     const eventId = req.params.eventId;
-    await assertUserCanOrderFood(req.user.id, eventId);
+    await assertUserCanOrderFood(req.user, eventId);
 
     const { dishId, day, meal, quantity } = req.body;
 
@@ -318,7 +320,7 @@ exports.deleteOrderItem = async (req, res) => {
     const eventId = req.params.eventId;
     const itemId = req.params.itemId;
 
-    await assertUserCanOrderFood(req.user.id, eventId);
+    await assertUserCanOrderFood(req.user, eventId);
 
     const { data: item } = await supabase
       .from('event_food_order_items')
@@ -328,7 +330,7 @@ exports.deleteOrderItem = async (req, res) => {
       .maybeSingle();
 
     if (!item) return res.status(404).json({ message: 'Línea de pedido no encontrada' });
-    if (item.user_id !== req.user.id && req.user.role !== 'administrador') {
+    if (item.user_id !== req.user.id && !isStaff(req.user)) {
       return res.status(403).json({ message: 'No puedes eliminar este pedido' });
     }
 
@@ -342,6 +344,18 @@ exports.deleteOrderItem = async (req, res) => {
     res.status(status).json({ message: error.message || 'Error interno del servidor' });
   }
 };
+
+async function fetchPaidUserIds(eventId) {
+  const { data, error } = await supabase
+    .from('event_food_payments')
+    .select('user_id, paid')
+    .eq('event_id', eventId);
+  if (error) {
+    if (isMissingSchema(error)) return null;
+    throw error;
+  }
+  return (data || []).filter((row) => row.paid).map((row) => row.user_id);
+}
 
 async function fetchAllOrdersForEvent(eventId) {
   const { data: items, error } = await supabase
@@ -367,6 +381,7 @@ exports.getAllOrders = async (req, res) => {
     if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
 
     const items = await fetchAllOrdersForEvent(eventId);
+    const paidUserIds = await fetchPaidUserIds(eventId);
 
     const orders = items.map((row) => ({
       id: row.id,
@@ -378,9 +393,125 @@ exports.getAllOrders = async (req, res) => {
       dish: row.event_food_dishes,
     }));
 
-    res.json({ orders });
+    res.json({ orders, paid_user_ids: paidUserIds });
   } catch (error) {
     console.error('Error al listar pedidos:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
+exports.setFoodPayment = async (req, res) => {
+  try {
+    const eventId = Number(req.params.eventId);
+    const userId = Number(req.body.userId);
+    const { paid } = req.body;
+    if (!Number.isInteger(eventId) || !Number.isInteger(userId) || typeof paid !== 'boolean') {
+      return res.status(400).json({ message: 'Indica el usuario y si ha pagado' });
+    }
+
+    const event = await getEventById(eventId);
+    if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
+
+    const { error } = await supabase
+      .from('event_food_payments')
+      .upsert({
+        event_id: eventId,
+        user_id: userId,
+        paid,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'event_id,user_id' });
+    if (error) {
+      if (isMissingSchema(error)) {
+        return res.status(503).json({ message: 'Falta aplicar la migración de pagos de comida' });
+      }
+      throw error;
+    }
+
+    res.json({ user_id: userId, paid });
+  } catch (error) {
+    console.error('Error al guardar el pago de comida:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
+exports.getMyOrdersHistory = async (req, res) => {
+  try {
+    const baseQuery = () => supabase
+      .from('event_food_order_items')
+      .select(`
+        id, event_id, day, meal, quantity,
+        events ( id, nombre, mes, anio, hidden, en_pruebas, food_en_pruebas ),
+        event_food_dishes ( id, name, price )
+      `)
+      .eq('user_id', req.user.id)
+      .order('event_id')
+      .order('day')
+      .order('meal');
+
+    let { data: items, error } = await baseQuery();
+    if (error && /en_pruebas/i.test(error.message || '')) {
+      const retry = await supabase
+        .from('event_food_order_items')
+        .select(`
+          id, event_id, day, meal, quantity,
+          events ( id, nombre, mes, anio ),
+          event_food_dishes ( id, name, price )
+        `)
+        .eq('user_id', req.user.id)
+        .order('event_id')
+        .order('day')
+        .order('meal');
+      items = retry.data;
+      error = retry.error;
+    }
+
+    if (error) throw error;
+
+    const byEvent = new Map();
+    for (const row of items || []) {
+      const eventRow = Array.isArray(row.events) ? row.events[0] : row.events;
+      if (!eventRow) continue;
+      if (!isDeveloper(req.user) && (eventRow.hidden || eventRow.en_pruebas || eventRow.food_en_pruebas)) continue;
+      if (!byEvent.has(row.event_id)) {
+        byEvent.set(row.event_id, {
+          event: eventRow,
+          orders: [],
+        });
+      }
+      byEvent.get(row.event_id).orders.push({
+        id: row.id,
+        day: row.day,
+        meal: row.meal,
+        quantity: row.quantity,
+        dish: row.event_food_dishes,
+      });
+    }
+
+    const monthIndex = {
+      enero: 1,
+      febrero: 2,
+      marzo: 3,
+      abril: 4,
+      mayo: 5,
+      junio: 6,
+      julio: 7,
+      agosto: 8,
+      septiembre: 9,
+      setiembre: 9,
+      octubre: 10,
+      noviembre: 11,
+      diciembre: 12,
+    };
+    const recency = (eventRow) => {
+      const month = monthIndex[String(eventRow?.mes || '').trim().toLowerCase()] || 0;
+      return (Number(eventRow?.anio) || 0) * 100 + month;
+    };
+
+    res.json({
+      events: [...byEvent.values()].sort((a, b) => recency(b.event) - recency(a.event)),
+    });
+  } catch (error) {
+    console.error('Error al obtener el historial de comida:', error);
     res.status(500).json({ message: 'Error interno del servidor' });
   }
 };

@@ -13,6 +13,7 @@ const {
   WAITLIST_STATE,
   inscriptionAvailability,
 } = require('../utils/inscriptionWindow');
+const { testingBlockReason } = require('../utils/access');
 
 async function loadFieldMeta(fieldIds) {
   const uniqueIds = [...new Set(fieldIds.filter(Boolean))];
@@ -212,9 +213,8 @@ exports.createInscription = async (req, res) => {
     ]);
     if (eventError) throw eventError;
     if (existingError) throw existingError;
-    if (!event || (event.hidden && req.user.role !== 'administrador')) {
-      return res.status(404).json({ message: 'Evento no encontrado' });
-    }
+    const blocked = testingBlockReason(event, req.user);
+    if (blocked) return res.status(blocked.status).json({ message: blocked.message });
 
     const availability = inscriptionAvailability(event);
     if (!availability.open) {
@@ -343,6 +343,10 @@ exports.updateMyInscription = async (req, res) => {
     }
 
     const { data: event } = await supabase.from('events').select('*').eq('id', eventId).maybeSingle();
+    const blocked = testingBlockReason(event, req.user);
+    if (blocked && (event?.en_pruebas || event?.inscription_en_pruebas || event?.hidden)) {
+      return res.status(blocked.status).json({ message: blocked.message });
+    }
     const availability = event ? inscriptionAvailability(event) : { open: false, message: 'Evento no encontrado' };
     if (!availability.open) {
       return res.status(403).json({ message: availability.message });
@@ -488,6 +492,46 @@ exports.updateInscriptionState = async (req, res) => {
     }
   } catch (error) {
     console.error('Error al actualizar estado:', error);
+    res.status(500).json({ message: 'Error interno del servidor' });
+  }
+};
+
+exports.updateInscriptionTariff = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tariffId = req.body.tariffId == null || req.body.tariffId === '' ? null : Number(req.body.tariffId);
+
+    const { data: current, error: currentError } = await supabase
+      .from('inscriptions')
+      .select('id, event_id')
+      .eq('id', id)
+      .maybeSingle();
+    if (currentError) throw currentError;
+    if (!current) return res.status(404).json({ message: 'Inscripción no encontrada' });
+
+    if (tariffId != null) {
+      if (!Number.isInteger(tariffId)) {
+        return res.status(400).json({ message: 'Tipo de inscripción no válido' });
+      }
+      const { data: tariff, error: tariffError } = await supabase
+        .from('event_tariffs')
+        .select('id')
+        .eq('id', tariffId)
+        .eq('event_id', current.event_id)
+        .maybeSingle();
+      if (tariffError) throw tariffError;
+      if (!tariff) return res.status(400).json({ message: 'Esa tarifa no pertenece a este evento' });
+    }
+
+    const { error } = await supabase
+      .from('inscriptions')
+      .update({ tariff_id: tariffId })
+      .eq('id', id);
+    if (error) throw error;
+
+    res.json({ message: 'Tipo de inscripción actualizado', tariff_id: tariffId });
+  } catch (error) {
+    console.error('Error al actualizar el tipo de inscripción:', error);
     res.status(500).json({ message: 'Error interno del servidor' });
   }
 };

@@ -40,8 +40,8 @@ exports.updateUserRole = async (req, res) => {
     const { role } = req.body;
     const { id } = req.params;
 
-    if (!['usuario', 'administrador'].includes(role)) {
-      return res.status(400).json({ message: 'Rol no válido. Debe ser "usuario" o "administrador"' });
+    if (!['usuario', 'administrador', 'desarrollador'].includes(role)) {
+      return res.status(400).json({ message: 'Rol no válido. Debe ser "usuario", "administrador" o "desarrollador"' });
     }
 
     const { data: updatedUser, error } = await supabase
@@ -51,7 +51,13 @@ exports.updateUserRole = async (req, res) => {
       .select(USER_SELECT)
       .single();
 
-    if (error) throw error;
+    if (error) {
+      const message = `${error.message || ''} ${error.details || ''}`;
+      if (/users_role_check|desarrollador/i.test(message)) {
+        return res.status(500).json({ message: 'Falta aplicar la migración 007_developer_role.sql en Supabase' });
+      }
+      throw error;
+    }
 
     res.json({ message: 'Rol actualizado correctamente', user: updatedUser });
   } catch (error) {
