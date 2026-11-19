@@ -98,7 +98,7 @@ function parseCollection(xml) {
     error.status = 404;
     throw error;
   }
-  return parseItems(xml).map(({ attrs, body }) => {
+  const games = parseItems(xml).map(({ attrs, body }) => {
     const subtype = attr(attrs, 'subtype');
     if (subtype && subtype !== 'boardgame') return null;
     const own = /<status\b[^>]*\bown="1"/.test(body);
@@ -115,6 +115,17 @@ function parseCollection(xml) {
       image_url: image || null,
     };
   }).filter(Boolean);
+
+  const byId = new Map();
+  for (const game of games) {
+    const current = byId.get(game.bgg_id);
+    if (!current || (game.anio != null && (current.anio == null || game.anio > current.anio))) {
+      byId.set(game.bgg_id, game);
+    } else if (!current.image_url && game.image_url) {
+      current.image_url = game.image_url;
+    }
+  }
+  return [...byId.values()];
 }
 
 function parseSearch(xml) {
