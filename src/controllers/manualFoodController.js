@@ -11,10 +11,20 @@ function httpError(message, status) {
 
 function manualFoodError(error, fallback) {
   const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`;
+  if (/manual_food_closed/i.test(message)) {
+    return 'Falta aplicar la migración 015_manual_food_closed.sql en Supabase';
+  }
+  if (/cantidad/i.test(message)) {
+    return 'Falta aplicar la migración 014_manual_food_quantity.sql en Supabase';
+  }
   if (/manual_food|event_manual_food/i.test(message)) {
     return 'Falta aplicar la migración 011_manual_food.sql en Supabase';
   }
   return schemaErrorMessage(error, fallback);
+}
+
+function missingCantidad(error) {
+  return /cantidad/i.test(`${error?.message || ''} ${error?.details || ''}`);
 }
 
 function presentUser(row) {
@@ -60,6 +70,30 @@ exports.setEnabled = async (req, res) => {
     if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
     res.json({
       message: enabled ? 'Comidas manuales activadas' : 'Comidas manuales desactivadas',
+      event,
+    });
+  } catch (error) {
+    console.error('Error al actualizar comidas manuales:', error);
+    res.status(500).json({ message: manualFoodError(error, 'Error interno del servidor') });
+  }
+};
+
+exports.setClosed = async (req, res) => {
+  try {
+    const { closed } = req.body;
+    if (typeof closed !== 'boolean') {
+      return res.status(400).json({ message: 'El campo closed debe ser true o false' });
+    }
+    const { data: event, error } = await supabase
+      .from('events')
+      .update({ manual_food_closed: closed })
+      .eq('id', req.params.eventId)
+      .select()
+      .maybeSingle();
+    if (error) throw error;
+    if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
+    res.json({
+      message: closed ? 'Pedido cerrado' : 'Pedido reabierto',
       event,
     });
   } catch (error) {
@@ -167,7 +201,7 @@ exports.getAdminSummary = async (req, res) => {
         .order('sort_order'),
       supabase
         .from('event_manual_food_orders')
-        .select('id, option_id, created_at, users ( id, username, nombre, apellidos, email ), event_manual_food_options ( id, nombre, coste_adicional )')
+        .select('id, option_id, cantidad, created_at, users ( id, username, nombre, apellidos, email ), event_manual_food_options ( id, nombre, coste_adicional )')
         .eq('event_id', event.id)
         .order('created_at', { ascending: false }),
       supabase
@@ -177,15 +211,27 @@ exports.getAdminSummary = async (req, res) => {
         .order('created_at', { ascending: false }),
     ]);
     if (optionsResult.error) throw optionsResult.error;
-    if (ordersResult.error) throw ordersResult.error;
+    let orderRows = ordersResult.data || [];
+    if (ordersResult.error && missingCantidad(ordersResult.error)) {
+      const fallback = await supabase
+        .from('event_manual_food_orders')
+        .select('id, option_id, created_at, users ( id, username, nombre, apellidos, email ), event_manual_food_options ( id, nombre, coste_adicional )')
+        .eq('event_id', event.id)
+        .order('created_at', { ascending: false });
+      if (fallback.error) throw fallback.error;
+      orderRows = (fallback.data || []).map((row) => ({ ...row, cantidad: 1 }));
+    } else if (ordersResult.error) {
+      throw ordersResult.error;
+    }
     if (requestsResult.error) throw requestsResult.error;
 
     res.json({
       manual_food_enabled: event.manual_food_enabled === true,
       options: optionsResult.data || [],
-      orders: (ordersResult.data || []).map((row) => ({
+      orders: orderRows.map((row) => ({
         id: row.id,
         created_at: row.created_at,
+        cantidad: Number(row.cantidad) || 1,
         option: row.event_manual_food_options,
         user: presentUser(row.users),
       })),
@@ -211,7 +257,7 @@ exports.getMine = async (req, res) => {
         .select('id, nombre, coste_adicional, sort_order')
         .eq('event_id', event.id)
         .order('sort_order'),
-      supabase.from('event_manual_food_orders').select('option_id').eq('event_id', event.id).eq('user_id', req.user.id),
+      supabase.from('event_manual_food_orders').select('option_id, cantidad').eq('event_id', event.id).eq('user_id', req.user.id),
       supabase
         .from('event_manual_food_requests')
         .select('id, texto, created_at')
@@ -224,12 +270,28 @@ exports.getMine = async (req, res) => {
         .eq('event_id', event.id),
     ]);
     if (optionsResult.error) throw optionsResult.error;
-    if (ordersResult.error) throw ordersResult.error;
+    let orderRows = ordersResult.data || [];
+    if (ordersResult.error && missingCantidad(ordersResult.error)) {
+      const fallback = await supabase
+        .from('event_manual_food_orders')
+        .select('option_id')
+        .eq('event_id', event.id)
+        .eq('user_id', req.user.id);
+      if (fallback.error) throw fallback.error;
+      orderRows = (fallback.data || []).map((row) => ({ ...row, cantidad: 1 }));
+    } else if (ordersResult.error) {
+      throw ordersResult.error;
+    }
     if (requestsResult.error) throw requestsResult.error;
     if (communityResult.error) throw communityResult.error;
     res.json({
+      closed: event.manual_food_closed === true,
       options: optionsResult.data || [],
-      selected_ids: (ordersResult.data || []).map((row) => row.option_id),
+      selected_ids: orderRows.map((row) => row.option_id),
+      items: orderRows.map((row) => ({
+        option_id: row.option_id,
+        cantidad: Number(row.cantidad) || 1,
+      })),
       requests: requestsResult.data || [],
       community: (communityResult.data || []).map((row) => ({
         option_id: row.option_id,
@@ -243,22 +305,45 @@ exports.getMine = async (req, res) => {
   }
 };
 
+function parseOrderItems(body) {
+  if (Array.isArray(body.items)) {
+    const merged = new Map();
+    for (const item of body.items) {
+      const optionId = Number(item?.optionId ?? item?.option_id);
+      const cantidad = Number(item?.cantidad ?? 1);
+      if (!Number.isInteger(optionId) || !Number.isInteger(cantidad) || cantidad < 1 || cantidad > 20) {
+        return { error: 'La cantidad de cada comida tiene que ser un número entre 1 y 20' };
+      }
+      merged.set(optionId, cantidad);
+    }
+    return { items: [...merged.entries()].map(([optionId, cantidad]) => ({ optionId, cantidad })) };
+  }
+  if (Array.isArray(body.optionIds)) {
+    const ids = [...new Set(body.optionIds.map(Number))];
+    if (ids.some((id) => !Number.isInteger(id))) return { error: 'Selecciona las comidas' };
+    return { items: ids.map((optionId) => ({ optionId, cantidad: 1 })) };
+  }
+  return { error: 'Selecciona las comidas' };
+}
+
 exports.saveMine = async (req, res) => {
   try {
     const event = await assertManualFoodUser(req.user, req.params.eventId);
-    const optionIds = Array.isArray(req.body.optionIds) ? [...new Set(req.body.optionIds.map(Number))] : null;
-    if (!optionIds || optionIds.some((id) => !Number.isInteger(id))) {
-      return res.status(400).json({ message: 'Selecciona las comidas' });
+    if (event.manual_food_closed === true) {
+      return res.status(403).json({ message: 'El pedido está cerrado y ya no se puede modificar' });
     }
+    const parsed = parseOrderItems(req.body);
+    if (parsed.error) return res.status(400).json({ message: parsed.error });
+    const items = parsed.items;
 
-    if (optionIds.length) {
+    if (items.length) {
       const { data: options, error } = await supabase
         .from('event_manual_food_options')
         .select('id')
         .eq('event_id', event.id)
-        .in('id', optionIds);
+        .in('id', items.map((item) => item.optionId));
       if (error) throw error;
-      if ((options || []).length !== optionIds.length) {
+      if ((options || []).length !== items.length) {
         return res.status(400).json({ message: 'Hay una comida que no pertenece a este evento' });
       }
     }
@@ -270,14 +355,23 @@ exports.saveMine = async (req, res) => {
       .eq('user_id', req.user.id);
     if (deleteError) throw deleteError;
 
-    if (optionIds.length) {
+    if (items.length) {
       const { error } = await supabase.from('event_manual_food_orders').insert(
-        optionIds.map((optionId) => ({ event_id: event.id, user_id: req.user.id, option_id: optionId })),
+        items.map((item) => ({
+          event_id: event.id,
+          user_id: req.user.id,
+          option_id: item.optionId,
+          cantidad: item.cantidad,
+        })),
       );
       if (error) throw error;
     }
 
-    res.json({ message: 'Comidas guardadas', selected_ids: optionIds });
+    res.json({
+      message: 'Comidas guardadas',
+      selected_ids: items.map((item) => item.optionId),
+      items: items.map((item) => ({ option_id: item.optionId, cantidad: item.cantidad })),
+    });
   } catch (error) {
     const status = error.status || 500;
     if (status >= 500) console.error('Error al guardar comidas manuales:', error);
