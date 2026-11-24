@@ -27,16 +27,16 @@ const LIST_COLUMNS = 'id, event_id, title, slug, route_path, published, created_
 
 function schemaErrorMessage(error, fallback) {
   const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`;
+  if (error?.code === '23505' || /duplicate key/i.test(message)) {
+    return 'Esa dirección ya la usa otra página';
+  }
+  const missingSchema = ['42P01', '42703', 'PGRST204', 'PGRST205'].includes(error?.code)
+    || /does not exist|schema cache|Could not find/i.test(message);
+  if (!missingSchema) return fallback;
   if (/route_path/i.test(message)) {
     return 'Falta aplicar la migración 013_fixed_pages.sql en Supabase';
   }
-  if (/public_pages|does not exist|schema cache|Could not find/i.test(message)) {
-    return 'Falta aplicar la migración 012_public_pages.sql en Supabase';
-  }
-  if (/duplicate key|public_pages_slug_key/i.test(message)) {
-    return 'Esa dirección ya la usa otra página';
-  }
-  return fallback;
+  return 'Falta aplicar la migración 012_public_pages.sql en Supabase';
 }
 
 function text(value, max) {
