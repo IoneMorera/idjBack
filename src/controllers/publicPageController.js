@@ -1,31 +1,50 @@
 const supabase = require('../database');
+const { uploadPageImage, saveToDisk } = require('../utils/profilePhoto');
+const { FIXED_PAGES } = require('../data/fixedPages');
 
-const SECTION_TYPES = new Set([
+const BLOCK_TYPES = new Set([
   'banner',
   'texto',
+  'textoImagen',
+  'iconos',
   'precios',
-  'tarjetas',
-  'bloques',
+  'alternados',
   'faq',
   'inscripcion',
   'contacto',
   'video',
+  'galeria',
+  'cartel',
 ]);
+
+const ICONS = new Set([
+  'hotel', 'bed', 'utensils', 'badgeCheck', 'goal', 'tag', 'clock', 'mapPin', 'calendar',
+  'gamepad', 'dices', 'users', 'euro', 'car', 'wifi', 'coffee', 'gift', 'star', 'heart', 'party',
+]);
+
+const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const LIST_COLUMNS = 'id, event_id, title, slug, route_path, published, created_at, updated_at';
 
 function schemaErrorMessage(error, fallback) {
   const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`;
-  if (/public_page|does not exist|schema cache|Could not find/i.test(message)) {
-    return 'Falta aplicar la migración 010_public_page.sql en Supabase';
+  if (/route_path/i.test(message)) {
+    return 'Falta aplicar la migración 013_fixed_pages.sql en Supabase';
+  }
+  if (/public_pages|does not exist|schema cache|Could not find/i.test(message)) {
+    return 'Falta aplicar la migración 012_public_pages.sql en Supabase';
+  }
+  if (/duplicate key|public_pages_slug_key/i.test(message)) {
+    return 'Esa dirección ya la usa otra página';
   }
   return fallback;
 }
 
-function text(value, max = 2000) {
+function text(value, max) {
   if (typeof value !== 'string') return '';
   return value.trim().slice(0, max);
 }
 
-function list(value, max = 30) {
+function list(value, max) {
   return Array.isArray(value) ? value.slice(0, max) : [];
 }
 
@@ -35,245 +54,287 @@ function keepId(value) {
 }
 
 function safeUrl(value) {
-  const url = text(value, 500);
+  const url = text(value, 600);
   if (!url) return '';
   if (/^https?:\/\//i.test(url)) return url;
+  if (url.startsWith('#')) return SLUG_RE.test(url.slice(1)) ? url : null;
   if (url.startsWith('/') && !url.startsWith('//')) return url;
   return null;
 }
 
-function safeHref(value) {
-  const href = text(value, 300);
-  if (!href || href === '#') return '';
-  if (href.startsWith('#')) {
-    return /^#[a-z0-9]+(?:-[a-z0-9]+)*$/.test(href) ? href : null;
-  }
-  return safeUrl(href);
+function invalid(message) {
+  const error = new Error(message);
+  error.status = 400;
+  return error;
 }
 
-function sanitizePage(body) {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return { error: 'La página no tiene un formato válido' };
-  }
+function sanitizeItem(raw) {
+  const item = raw && typeof raw === 'object' ? raw : {};
+  const image = safeUrl(item.image);
+  if (image === null) throw invalid('Una imagen no es válida. Usa una ruta que empiece por / o una URL http(s)');
+  return {
+    id: keepId(item.id),
+    badge: text(item.badge, 80),
+    icon: ICONS.has(item.icon) ? item.icon : 'star',
+    title: text(item.title, 300),
+    price: text(item.price, 80),
+    text: text(item.text, 3000),
+    image,
+    media: item.media === 'video' ? 'video' : 'image',
+  };
+}
 
-  const slug = text(body.slug, 80).toLowerCase();
-  const published = body.published === true;
-  if (slug && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
-    return { error: 'La dirección solo puede llevar minúsculas, números y guiones' };
-  }
-  if (published && !slug) {
-    return { error: 'Indica una dirección antes de publicar la página' };
-  }
+function sanitizePiece(raw) {
+  const piece = raw && typeof raw === 'object' ? raw : {};
+  return {
+    id: keepId(piece.id),
+    kind: piece.kind === 'lista' ? 'lista' : 'parrafo',
+    intro: text(piece.intro, 500),
+    text: text(piece.text, 4000),
+    outro: text(piece.outro, 2000),
+  };
+}
 
-  const header = [];
-  for (const link of list(body.header, 20)) {
-    if (!link || typeof link !== 'object') continue;
-    const label = text(link.label, 80);
-    const href = safeHref(link.href);
-    if (href === null) return { error: 'Un enlace de la cabecera no es válido. Usa #ancla, una ruta interna o una URL http(s)' };
-    header.push({ id: keepId(link.id), label, href });
-  }
-
-  const sections = [];
+function sanitizeBlocks(rawBlocks) {
   const anchors = new Set();
-  for (const section of list(body.sections, 30)) {
-    if (!section || typeof section !== 'object') continue;
-    if (!SECTION_TYPES.has(section.type)) {
-      return { error: 'Hay una sección de un tipo que no existe' };
+  return list(rawBlocks, 40).map((raw) => {
+    const block = raw && typeof raw === 'object' ? raw : {};
+    if (!BLOCK_TYPES.has(block.type)) throw invalid('Hay un bloque de un tipo que no existe');
+
+    const anchor = text(block.anchor, 60).toLowerCase();
+    if (anchor && !SLUG_RE.test(anchor)) {
+      throw invalid('El ancla de un bloque solo puede llevar minúsculas, números y guiones');
     }
-    const anchor = text(section.anchor, 80).toLowerCase();
-    if (anchor && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(anchor)) {
-      return { error: 'El ancla de una sección solo puede llevar minúsculas, números y guiones' };
-    }
-    if (anchor && anchors.has(anchor)) {
-      return { error: `El ancla «${anchor}» está repetida` };
-    }
+    if (anchor && anchors.has(anchor)) throw invalid(`El ancla «${anchor}» está repetida`);
     if (anchor) anchors.add(anchor);
 
-    const image = safeUrl(section.image);
-    const url = safeUrl(section.url);
+    const image = safeUrl(block.image);
+    const url = safeUrl(block.url);
     if (image === null || url === null) {
-      return { error: 'Una imagen o un enlace de sección no es válido. Usa una ruta interna o una URL http(s)' };
+      throw invalid('Una imagen o un enlace no es válido. Usa una ruta que empiece por /, #ancla o una URL http(s)');
     }
 
-    const lines = list(section.lines, 40)
-      .map((line) => text(line, 2000))
-      .filter(Boolean);
-
-    const blocks = [];
-    for (const block of list(section.blocks, 20)) {
-      if (!block || typeof block !== 'object') continue;
-      if (block.kind === 'list') {
-        const items = text(block.itemsText, 4000)
-          .split('\n')
-          .map((item) => item.trim())
-          .filter(Boolean)
-          .slice(0, 30);
-        blocks.push({
-          id: keepId(block.id),
-          kind: 'list',
-          text: '',
-          intro: text(block.intro, 500),
-          itemsText: items.join('\n'),
-          outro: text(block.outro, 2000),
-        });
-      } else {
-        blocks.push({
-          id: keepId(block.id),
-          kind: 'text',
-          text: text(block.text, 4000),
-          intro: '',
-          itemsText: '',
-          outro: '',
-        });
-      }
-    }
-
-    const cards = list(section.cards, 20)
-      .filter((card) => card && typeof card === 'object')
-      .map((card) => ({
-        id: keepId(card.id),
-        title: text(card.title, 160),
-        price: text(card.price, 80),
-        detail: text(card.detail, 500),
-      }));
-
-    const entries = list(section.entries, 20)
-      .filter((entry) => entry && typeof entry === 'object')
-      .map((entry) => {
-        const entryImage = safeUrl(entry.image);
-        return {
-          id: keepId(entry.id),
-          badge: text(entry.badge, 80),
-          title: text(entry.title, 200),
-          description: text(entry.description, 2000),
-          image: entryImage || '',
-          question: text(entry.question, 300),
-          answer: text(entry.answer, 2000),
-          imageInvalid: entryImage === null,
-        };
-      });
-
-    if (entries.some((entry) => entry.imageInvalid)) {
-      return { error: 'Una imagen de bloque no es válida. Usa una ruta interna o una URL http(s)' };
-    }
-
-    sections.push({
-      id: keepId(section.id),
-      type: section.type,
+    return {
+      id: keepId(block.id),
+      type: block.type,
       anchor,
-      label: text(section.label, 120),
-      title: text(section.title, 200),
-      highlight: text(section.highlight, 200),
-      subtitle: text(section.subtitle, 500),
+      menuLabel: anchor ? text(block.menuLabel, 60) : '',
+      label: text(block.label, 120),
+      title: text(block.title, 200),
+      highlight: text(block.highlight, 200),
+      subtitle: text(block.subtitle, 600),
+      body: text(block.body, 6000),
       image,
-      alt: text(section.alt, 160),
-      email: text(section.email, 200),
-      buttonLabel: text(section.buttonLabel, 160),
+      alt: text(block.alt, 200),
       url,
-      lines,
-      blocks,
-      cards,
-      entries: entries.map(({ imageInvalid, ...entry }) => entry),
-    });
+      buttonLabel: text(block.buttonLabel, 120),
+      email: text(block.email, 200),
+      size: block.size === 'mediano' ? 'mediano' : 'grande',
+      imageEffect: block.imageEffect === 'gris' ? 'gris' : 'ninguno',
+      pieces: list(block.pieces, 20).map(sanitizePiece),
+      items: list(block.items, 40).map(sanitizeItem),
+    };
+  });
+}
+
+function sanitizePage(body, { partial = false } = {}) {
+  const source = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+  const patch = {};
+
+  if (!partial || 'title' in source) {
+    const title = text(source.title, 160);
+    if (!title) throw invalid('La página necesita un título');
+    patch.title = title;
   }
-
-  return { page: { slug, published, header, sections } };
+  if (!partial || 'slug' in source) {
+    const slug = text(source.slug, 80).toLowerCase();
+    if (!SLUG_RE.test(slug)) throw invalid('La dirección solo puede llevar minúsculas, números y guiones');
+    patch.slug = slug;
+  }
+  if ('event_id' in source) {
+    if (source.event_id === null || source.event_id === '') {
+      patch.event_id = null;
+    } else {
+      const eventId = Number(source.event_id);
+      if (!Number.isInteger(eventId) || eventId < 1) throw invalid('El evento no es válido');
+      patch.event_id = eventId;
+    }
+  }
+  if ('published' in source) {
+    if (typeof source.published !== 'boolean') throw invalid('Publicar tiene que ser sí o no');
+    patch.published = source.published;
+  }
+  if ('blocks' in source) patch.blocks = sanitizeBlocks(source.blocks);
+  return patch;
 }
 
-function emptyPage() {
-  return { slug: '', published: false, header: [], sections: [] };
+function sendError(res, error, fallback) {
+  if (error?.status === 400) return res.status(400).json({ message: error.message });
+  console.error(fallback, error);
+  const message = schemaErrorMessage(error, fallback);
+  return res.status(/ya la usa/.test(message) ? 400 : 500).json({ message });
 }
 
-async function loadEvent(id) {
-  const { data, error } = await supabase
-    .from('events')
-    .select('id, nombre, mes, anio, public_page')
-    .eq('id', id)
-    .maybeSingle();
+async function ensureFixedPages() {
+  const { data: existing, error } = await supabase
+    .from('public_pages')
+    .select('route_path')
+    .not('route_path', 'is', null);
   if (error) throw error;
-  return data;
+  const present = new Set((existing || []).map((row) => row.route_path));
+
+  for (const fixed of FIXED_PAGES) {
+    if (present.has(fixed.route_path)) continue;
+    const row = {
+      route_path: fixed.route_path,
+      slug: fixed.slug,
+      title: fixed.title,
+      published: false,
+      blocks: sanitizeBlocks(fixed.build()),
+    };
+    let { error: insertError } = await supabase.from('public_pages').insert(row);
+    if (insertError && /public_pages_slug_key/i.test(`${insertError.message} ${insertError.details || ''}`)) {
+      ({ error: insertError } = await supabase.from('public_pages').insert({ ...row, slug: `${fixed.slug}-fija` }));
+    }
+    if (insertError && !/public_pages_route_path_key/i.test(`${insertError.message} ${insertError.details || ''}`)) {
+      throw insertError;
+    }
+  }
 }
 
-exports.getPage = async (req, res) => {
+exports.listPages = async (req, res) => {
   try {
-    const event = await loadEvent(req.params.id);
-    if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
-    const stored = event.public_page && typeof event.public_page === 'object' ? event.public_page : emptyPage();
-    const sanitized = sanitizePage(stored);
-    res.json({
-      event: { id: event.id, nombre: event.nombre, mes: event.mes, anio: event.anio },
-      page: sanitized.page || emptyPage(),
-    });
+    await ensureFixedPages();
+    const { data, error } = await supabase
+      .from('public_pages')
+      .select(LIST_COLUMNS)
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+    res.json({ pages: data || [] });
   } catch (error) {
-    console.error('Error al cargar la página pública:', error);
-    res.status(500).json({ message: schemaErrorMessage(error, 'Error al cargar la página pública') });
+    sendError(res, error, 'Error al cargar las páginas');
   }
 };
 
-exports.savePage = async (req, res) => {
+exports.getPage = async (req, res) => {
   try {
-    const event = await loadEvent(req.params.id);
-    if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
-
-    const sanitized = sanitizePage(req.body);
-    if (sanitized.error) return res.status(400).json({ message: sanitized.error });
-
-    if (sanitized.page.slug) {
-      const { data: others, error: dupError } = await supabase
-        .from('events')
-        .select('id')
-        .filter('public_page->>slug', 'eq', sanitized.page.slug)
-        .neq('id', req.params.id);
-      if (dupError) throw dupError;
-      if (others?.length) {
-        return res.status(400).json({ message: 'Esa dirección ya la usa otro evento' });
-      }
-    }
-
-    const { error } = await supabase
-      .from('events')
-      .update({ public_page: sanitized.page })
-      .eq('id', req.params.id);
+    const { data, error } = await supabase
+      .from('public_pages')
+      .select('*')
+      .eq('id', req.params.id)
+      .maybeSingle();
     if (error) throw error;
-
-    res.json({
-      message: sanitized.page.published ? 'Página pública guardada y publicada' : 'Página pública guardada',
-      event: { id: event.id, nombre: event.nombre, mes: event.mes, anio: event.anio },
-      page: sanitized.page,
-    });
+    if (!data) return res.status(404).json({ message: 'Página no encontrada' });
+    res.json({ page: { ...data, blocks: sanitizeBlocks(data.blocks) } });
   } catch (error) {
-    console.error('Error al guardar la página pública:', error);
-    res.status(500).json({ message: schemaErrorMessage(error, 'Error al guardar la página pública') });
+    sendError(res, error, 'Error al cargar la página');
+  }
+};
+
+exports.createPage = async (req, res) => {
+  try {
+    const row = sanitizePage(req.body);
+    row.published = false;
+    if (!row.blocks) row.blocks = [];
+    const { data, error } = await supabase.from('public_pages').insert(row).select('*').single();
+    if (error) throw error;
+    res.status(201).json({ message: 'Página creada', page: data });
+  } catch (error) {
+    sendError(res, error, 'Error al crear la página');
+  }
+};
+
+exports.updatePage = async (req, res) => {
+  try {
+    const patch = sanitizePage(req.body, { partial: true });
+    if (Object.keys(patch).length === 0) return res.status(400).json({ message: 'No hay cambios que guardar' });
+    patch.updated_at = new Date().toISOString();
+    const { data, error } = await supabase
+      .from('public_pages')
+      .update(patch)
+      .eq('id', req.params.id)
+      .select('*')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ message: 'Página no encontrada' });
+    res.json({ message: data.published ? 'Página guardada y publicada' : 'Página guardada', page: data });
+  } catch (error) {
+    sendError(res, error, 'Error al guardar la página');
+  }
+};
+
+exports.deletePage = async (req, res) => {
+  try {
+    const { data: current, error: findError } = await supabase
+      .from('public_pages')
+      .select('route_path')
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (findError) throw findError;
+    if (current?.route_path) {
+      return res.status(400).json({ message: 'Las páginas fijas no se pueden eliminar. Retírala para volver a la versión original.' });
+    }
+    const { error } = await supabase.from('public_pages').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ message: 'Página eliminada' });
+  } catch (error) {
+    sendError(res, error, 'Error al eliminar la página');
+  }
+};
+
+exports.uploadImage = async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'No se ha proporcionado una imagen' });
+    let url;
+    try {
+      url = await uploadPageImage(req.file);
+    } catch (storageError) {
+      console.error('No se pudo subir la imagen a Storage, se guarda en disco:', storageError);
+      url = saveToDisk('page', req.file);
+    }
+    res.json({ url });
+  } catch (error) {
+    sendError(res, error, 'Error al subir la imagen');
   }
 };
 
 exports.getPublishedPage = async (req, res) => {
   try {
     const slug = text(req.params.slug, 80).toLowerCase();
-    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
-      return res.status(404).json({ message: 'Página no encontrada' });
-    }
-
+    if (!SLUG_RE.test(slug)) return res.status(404).json({ message: 'Página no encontrada' });
     const { data, error } = await supabase
-      .from('events')
-      .select('id, nombre, mes, anio, public_page')
-      .filter('public_page->>slug', 'eq', slug)
+      .from('public_pages')
+      .select('id, title, slug, published, blocks')
+      .eq('slug', slug)
+      .eq('published', true)
+      .is('route_path', null)
       .maybeSingle();
     if (error) throw error;
-
-    const page = data?.public_page;
-    if (!data || !page || page.published !== true) {
-      return res.status(404).json({ message: 'Página no encontrada' });
-    }
-
-    const sanitized = sanitizePage(page);
-    res.json({
-      event: { id: data.id, nombre: data.nombre, mes: data.mes, anio: data.anio },
-      page: sanitized.page || emptyPage(),
-    });
+    if (!data) return res.status(404).json({ message: 'Página no encontrada' });
+    res.json({ page: { ...data, blocks: sanitizeBlocks(data.blocks) } });
   } catch (error) {
-    console.error('Error al obtener la página pública:', error);
-    res.status(500).json({ message: schemaErrorMessage(error, 'Error al obtener la página pública') });
+    if (error?.status === 400) return res.status(404).json({ message: 'Página no encontrada' });
+    sendError(res, error, 'Error al obtener la página');
+  }
+};
+
+exports.getPublishedRoute = async (req, res) => {
+  const routePath = text(req.query.path, 200);
+  if (!FIXED_PAGES.some((fixed) => fixed.route_path === routePath)) {
+    return res.status(404).json({ message: 'Página no encontrada' });
+  }
+  try {
+    const { data, error } = await supabase
+      .from('public_pages')
+      .select('id, title, slug, route_path, published, blocks')
+      .eq('route_path', routePath)
+      .eq('published', true)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ message: 'Página no encontrada' });
+    res.json({ page: { ...data, blocks: sanitizeBlocks(data.blocks) } });
+  } catch (error) {
+    console.error('Error al obtener la página fija:', error);
+    res.status(404).json({ message: 'Página no encontrada' });
   }
 };

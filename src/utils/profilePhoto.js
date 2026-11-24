@@ -49,6 +49,11 @@ async function uploadEventLogo(eventId, file) {
   return uploadToBucket(`events/${eventId}/logo-${Date.now()}${ext}`, file);
 }
 
+async function uploadPageImage(file) {
+  const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg';
+  return uploadToBucket(`pages/${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`, file);
+}
+
 function saveToDisk(userId, file) {
   const uploadsDir = path.join(__dirname, '..', '..', 'uploads');
   if (!fs.existsSync(uploadsDir)) {
@@ -76,6 +81,7 @@ function missingUploadRedirectUrl(req) {
 module.exports = {
   uploadProfilePhoto,
   uploadEventLogo,
+  uploadPageImage,
   saveToDisk,
   shouldRedirectMissingUpload,
   missingUploadRedirectUrl,
