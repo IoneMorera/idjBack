@@ -14,6 +14,8 @@ const eventRoutes = require('./routes/events');
 const inscriptionRoutes = require('./routes/inscriptions');
 const formRoutes = require('./routes/forms');
 const publicRoutes = require('./routes/public');
+const siteRoutes = require('./routes/site');
+const pageRoutes = require('./routes/pages');
 const { shouldRedirectMissingUpload, missingUploadRedirectUrl } = require('./utils/profilePhoto');
 
 const app = express();
@@ -67,6 +69,8 @@ app.use('/api/events', eventRoutes);
 app.use('/api/inscriptions', inscriptionRoutes);
 app.use('/api/forms', formRoutes);
 app.use('/api/public', publicRoutes);
+app.use('/api/site', siteRoutes);
+app.use('/api/pages', pageRoutes);
 
 app.listen(PORT, () => {
   console.log(`Servidor IDJ Backend ejecutándose en http://localhost:${PORT}`);
