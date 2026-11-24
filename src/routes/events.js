@@ -13,8 +13,6 @@ const gameRoutes = require('./games');
 const snackRoutes = require('./snacks');
 const manualFoodRoutes = require('./manualFood');
 const { authMiddleware, adminMiddleware } = require('../middleware/auth');
-const publicPageController = require('../controllers/publicPageController');
-
 const logoUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
@@ -39,8 +37,6 @@ router.use('/:eventId/snacks', snackRoutes);
 router.use('/:eventId/manual-food', manualFoodRoutes);
 router.use('/:eventId/tariffs', tariffRoutes);
 router.use('/:eventId/emails', emailTemplateRoutes);
-router.get('/:id/public-page', authMiddleware, adminMiddleware, publicPageController.getPage);
-router.put('/:id/public-page', authMiddleware, adminMiddleware, publicPageController.savePage);
 router.get('/:id', authMiddleware, eventController.getEventById);
 router.post('/', authMiddleware, adminMiddleware, eventController.createEvent);
 router.patch('/:id', authMiddleware, adminMiddleware, eventController.updateEventSettings);
