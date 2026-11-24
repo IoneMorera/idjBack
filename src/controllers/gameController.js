@@ -1,6 +1,6 @@
 const supabase = require('../database');
 const { getEventById, getUserInscription, isInscrito } = require('../utils/foodAccess');
-const { isStaff } = require('../utils/access');
+const { isStaff, developerPreview } = require('../utils/access');
 const { fetchCollection, searchGames } = require('../services/bgg');
 const { schemaErrorMessage } = require('../utils/schema');
 
@@ -33,7 +33,8 @@ async function assertGamesAccess(user, eventId, { write = false } = {}) {
   const event = await getEventById(eventId);
   if (!event) throw httpError('Evento no encontrado', 404);
   const staff = isStaff(user);
-  if (!event.games_enabled && !staff) {
+  const preview = developerPreview(user, event.games_en_pruebas);
+  if (!event.games_enabled && !staff && !preview) {
     throw httpError('El listado de juegos no está habilitado para este evento', 403);
   }
   if (event.games_en_pruebas && !staff) {
@@ -43,10 +44,10 @@ async function assertGamesAccess(user, eventId, { write = false } = {}) {
     throw httpError('Evento no encontrado', 404);
   }
   const inscription = await getUserInscription(user.id, eventId);
-  if (write && !isInscrito(inscription)) {
+  if (write && !preview && !isInscrito(inscription)) {
     throw httpError('Debes estar inscrito con estado Inscrito para gestionar juegos', 403);
   }
-  if (!write && !staff && !isInscrito(inscription)) {
+  if (!write && !staff && !preview && !isInscrito(inscription)) {
     throw httpError('Debes estar inscrito con estado Inscrito para ver los juegos', 403);
   }
   return event;

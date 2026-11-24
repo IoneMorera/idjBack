@@ -521,7 +521,7 @@ exports.getMyOrdersHistory = async (req, res) => {
       .from('event_food_order_items')
       .select(`
         id, event_id, day, meal, quantity,
-        events ( id, nombre, mes, anio, hidden, en_pruebas, food_en_pruebas ),
+        events ( id, nombre, mes, anio, starts_on, ends_on, hidden, en_pruebas, food_en_pruebas ),
         event_food_dishes ( id, name, price )
       `)
       .eq('user_id', req.user.id)
@@ -530,6 +530,21 @@ exports.getMyOrdersHistory = async (req, res) => {
       .order('meal');
 
     let { data: items, error } = await baseQuery();
+    if (error && /starts_on|ends_on/i.test(`${error.message || ''} ${error.details || ''}`)) {
+      const retry = await supabase
+        .from('event_food_order_items')
+        .select(`
+          id, event_id, day, meal, quantity,
+          events ( id, nombre, mes, anio, hidden, en_pruebas, food_en_pruebas ),
+          event_food_dishes ( id, name, price )
+        `)
+        .eq('user_id', req.user.id)
+        .order('event_id')
+        .order('day')
+        .order('meal');
+      items = retry.data;
+      error = retry.error;
+    }
     if (error && /en_pruebas/i.test(error.message || '')) {
       const retry = await supabase
         .from('event_food_order_items')

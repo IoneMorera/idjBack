@@ -13,7 +13,7 @@ const {
   WAITLIST_STATE,
   inscriptionAvailability,
 } = require('../utils/inscriptionWindow');
-const { testingBlockReason } = require('../utils/access');
+const { testingBlockReason, developerPreview } = require('../utils/access');
 
 async function loadFieldMeta(fieldIds) {
   const uniqueIds = [...new Set(fieldIds.filter(Boolean))];
@@ -217,7 +217,7 @@ exports.createInscription = async (req, res) => {
     if (blocked) return res.status(blocked.status).json({ message: blocked.message });
 
     const availability = inscriptionAvailability(event);
-    if (!availability.open) {
+    if (!availability.open && !developerPreview(req.user, event?.inscription_en_pruebas)) {
       return res.status(403).json({ message: availability.message });
     }
 
@@ -348,7 +348,7 @@ exports.updateMyInscription = async (req, res) => {
       return res.status(blocked.status).json({ message: blocked.message });
     }
     const availability = event ? inscriptionAvailability(event) : { open: false, message: 'Evento no encontrado' };
-    if (!availability.open) {
+    if (!availability.open && !developerPreview(req.user, event?.inscription_en_pruebas)) {
       return res.status(403).json({ message: availability.message });
     }
 

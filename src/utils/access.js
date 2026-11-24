@@ -12,11 +12,16 @@ function maskTesting(event, user) {
   if (next.food_en_pruebas) next.food_ordering_enabled = false;
   if (next.games_en_pruebas) next.games_enabled = false;
   if (next.snacks_en_pruebas) next.snacks_enabled = false;
+  if (next.manual_food_en_pruebas) next.manual_food_enabled = false;
   if (next.inscription_en_pruebas) {
     next.inscripciones_abiertas = false;
     next.inscripciones_mensaje = 'Inscripción no disponible';
   }
   return next;
+}
+
+function developerPreview(user, flag) {
+  return isDeveloper(user) && flag === true;
 }
 
 function testingBlockReason(event, user) {
@@ -33,6 +38,7 @@ function testingBlockReason(event, user) {
 module.exports = {
   isDeveloper,
   isStaff,
+  developerPreview,
   maskTesting,
   testingBlockReason,
 };
