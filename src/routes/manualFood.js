@@ -4,6 +4,7 @@ const manualFoodController = require('../controllers/manualFoodController');
 const { authMiddleware, adminMiddleware } = require('../middleware/auth');
 
 router.patch('/enabled', authMiddleware, adminMiddleware, manualFoodController.setEnabled);
+router.patch('/closed', authMiddleware, adminMiddleware, manualFoodController.setClosed);
 router.get('/options', authMiddleware, adminMiddleware, manualFoodController.getOptions);
 router.post('/options', authMiddleware, adminMiddleware, manualFoodController.createOption);
 router.put('/options/:optionId', authMiddleware, adminMiddleware, manualFoodController.updateOption);
