@@ -1,5 +1,5 @@
 const supabase = require('../database');
-const { isStaff } = require('./access');
+const { isStaff, developerPreview } = require('./access');
 
 const VALID_DAYS = ['jueves', 'viernes', 'sabado', 'domingo'];
 const VALID_MEALS = ['comida', 'cena'];
@@ -43,7 +43,7 @@ async function assertFoodOrderingEnabled(eventId, user) {
     err.status = 404;
     throw err;
   }
-  if (!event.food_ordering_enabled) {
+  if (!event.food_ordering_enabled && !developerPreview(user, event.food_en_pruebas)) {
     const err = new Error('Los pedidos de comida no están habilitados para este evento');
     err.status = 403;
     throw err;
@@ -62,7 +62,8 @@ async function assertFoodOrderingEnabled(eventId, user) {
 }
 
 async function assertUserCanOrderFood(user, eventId) {
-  await assertFoodOrderingEnabled(eventId, user);
+  const event = await assertFoodOrderingEnabled(eventId, user);
+  if (developerPreview(user, event.food_en_pruebas)) return null;
   const inscription = await getUserInscription(user.id, eventId);
   if (!isInscrito(inscription)) {
     const err = new Error('Debes estar inscrito con estado Inscrito para pedir comida');

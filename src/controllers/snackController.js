@@ -1,7 +1,25 @@
 const supabase = require('../database');
 const { getEventById, getUserInscription, isInscrito } = require('../utils/foodAccess');
-const { isStaff } = require('../utils/access');
-const { schemaErrorMessage } = require('../utils/schema');
+const { isStaff, developerPreview } = require('../utils/access');
+const { schemaErrorMessage: sharedSchemaError } = require('../utils/schema');
+
+const OPTION_COLUMNS = 'id, nombre, coste_adicional, sort_order, tipo';
+
+function schemaErrorMessage(error, fallback) {
+  const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`;
+  if (/\btipo\b/i.test(message)) {
+    return 'Falta aplicar la migración 013_snack_sections.sql en Supabase';
+  }
+  return sharedSchemaError(error, fallback);
+}
+
+function parseTipo(value) {
+  const tipo = String(value || '').trim().toLowerCase();
+  if (tipo !== 'comida' && tipo !== 'bebida') {
+    return { error: 'Indica si la opción es comida o bebida' };
+  }
+  return { value: tipo };
+}
 
 function httpError(message, status) {
   const error = new Error(message);
@@ -23,12 +41,15 @@ function presentUser(row) {
 async function assertSnackUser(user, eventId) {
   const event = await getEventById(eventId);
   if (!event) throw httpError('Evento no encontrado', 404);
+  const preview = developerPreview(user, event.snacks_en_pruebas);
   if ((event.hidden || event.en_pruebas) && !isStaff(user)) throw httpError('Evento no encontrado', 404);
-  if (!event.snacks_enabled) throw httpError('El picoteo no está habilitado para este evento', 403);
+  if (!event.snacks_enabled && !preview) throw httpError('El picoteo no está habilitado para este evento', 403);
   if (event.snacks_en_pruebas && !isStaff(user)) throw httpError('El picoteo está en pruebas', 403);
-  const inscription = await getUserInscription(user.id, eventId);
-  if (!isInscrito(inscription)) {
-    throw httpError('Debes estar inscrito con estado Inscrito para pedir picoteo', 403);
+  if (!preview) {
+    const inscription = await getUserInscription(user.id, eventId);
+    if (!isInscrito(inscription)) {
+      throw httpError('Debes estar inscrito con estado Inscrito para pedir picoteo', 403);
+    }
   }
   return event;
 }
@@ -63,8 +84,9 @@ exports.getOptions = async (req, res) => {
     if (!event) return res.status(404).json({ message: 'Evento no encontrado' });
     const { data, error } = await supabase
       .from('event_snack_options')
-      .select('id, nombre, coste_adicional, sort_order')
+      .select(OPTION_COLUMNS)
       .eq('event_id', event.id)
+      .order('tipo', { ascending: true })
       .order('sort_order', { ascending: true })
       .order('id', { ascending: true });
     if (error) throw error;
@@ -83,7 +105,9 @@ exports.createOption = async (req, res) => {
     const coste = req.body.coste_adicional == null || req.body.coste_adicional === ''
       ? 0
       : Number(req.body.coste_adicional);
+    const tipo = parseTipo(req.body.tipo);
     if (!nombre) return res.status(400).json({ message: 'Indica el nombre del picoteo' });
+    if (tipo.error) return res.status(400).json({ message: tipo.error });
     if (!Number.isFinite(coste) || coste < 0) {
       return res.status(400).json({ message: 'El coste adicional no es válido' });
     }
@@ -93,8 +117,8 @@ exports.createOption = async (req, res) => {
       .eq('event_id', event.id);
     const { data, error } = await supabase
       .from('event_snack_options')
-      .insert({ event_id: event.id, nombre, coste_adicional: coste, sort_order: count || 0 })
-      .select('id, nombre, coste_adicional, sort_order')
+      .insert({ event_id: event.id, nombre, coste_adicional: coste, tipo: tipo.value, sort_order: count || 0 })
+      .select(OPTION_COLUMNS)
       .single();
     if (error) throw error;
     res.status(201).json({ message: 'Opción añadida', option: data });
@@ -108,16 +132,18 @@ exports.updateOption = async (req, res) => {
   try {
     const nombre = String(req.body.nombre || '').trim();
     const coste = Number(req.body.coste_adicional ?? 0);
+    const tipo = parseTipo(req.body.tipo);
     if (!nombre) return res.status(400).json({ message: 'Indica el nombre del picoteo' });
+    if (tipo.error) return res.status(400).json({ message: tipo.error });
     if (!Number.isFinite(coste) || coste < 0) {
       return res.status(400).json({ message: 'El coste adicional no es válido' });
     }
     const { data, error } = await supabase
       .from('event_snack_options')
-      .update({ nombre, coste_adicional: coste })
+      .update({ nombre, coste_adicional: coste, tipo: tipo.value })
       .eq('id', req.params.optionId)
       .eq('event_id', req.params.eventId)
-      .select('id, nombre, coste_adicional, sort_order')
+      .select(OPTION_COLUMNS)
       .maybeSingle();
     if (error) throw error;
     if (!data) return res.status(404).json({ message: 'Opción no encontrada' });
@@ -151,12 +177,13 @@ exports.getAdminSummary = async (req, res) => {
     const [optionsResult, ordersResult, requestsResult] = await Promise.all([
       supabase
         .from('event_snack_options')
-        .select('id, nombre, coste_adicional, sort_order')
+        .select(OPTION_COLUMNS)
         .eq('event_id', event.id)
+        .order('tipo')
         .order('sort_order'),
       supabase
         .from('event_snack_orders')
-        .select('id, option_id, created_at, users ( id, username, nombre, apellidos, email ), event_snack_options ( id, nombre, coste_adicional )')
+        .select('id, option_id, created_at, users ( id, username, nombre, apellidos, email ), event_snack_options ( id, nombre, coste_adicional, tipo )')
         .eq('event_id', event.id)
         .order('created_at', { ascending: false }),
       supabase
@@ -197,8 +224,9 @@ exports.getMine = async (req, res) => {
     const [optionsResult, ordersResult, requestsResult, communityResult] = await Promise.all([
       supabase
         .from('event_snack_options')
-        .select('id, nombre, coste_adicional, sort_order')
+        .select(OPTION_COLUMNS)
         .eq('event_id', event.id)
+        .order('tipo')
         .order('sort_order'),
       supabase.from('event_snack_orders').select('option_id').eq('event_id', event.id).eq('user_id', req.user.id),
       supabase

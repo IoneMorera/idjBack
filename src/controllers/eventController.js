@@ -8,8 +8,14 @@ function schemaErrorMessage(error, fallback) {
   if (/en_pruebas/i.test(message)) {
     return 'Falta aplicar la migración 007_developer_role.sql en Supabase';
   }
+  if (/manual_food|event_manual_food/i.test(message)) {
+    return 'Falta aplicar la migración 011_manual_food.sql en Supabase';
+  }
   if (/bgg_username|games_enabled|snacks_enabled|logo_url|event_rooms|event_games|event_snack/i.test(message)) {
     return 'Falta aplicar la migración 006_rooms_games_snacks.sql en Supabase';
+  }
+  if (/starts_on|ends_on/i.test(message)) {
+    return 'Falta aplicar la migración 012_event_dates.sql en Supabase';
   }
   if (/does not exist|schema cache|inscription_starts_at|max_inscriptions/i.test(message)) {
     return 'Falta aplicar la migración 005_inscription_window.sql en Supabase';
@@ -25,6 +31,39 @@ function parseDateInput(value, label) {
     return { error: `${label} no es una fecha válida` };
   }
   return { value: date.toISOString() };
+}
+
+function parseDateOnly(value, label) {
+  if (value === undefined) return { skip: true };
+  if (value === null || value === '') return { value: null };
+  const text = String(value).trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return { error: `${label} no es una fecha válida` };
+  }
+  const [year, month, day] = text.split('-').map(Number);
+  const utc = new Date(Date.UTC(year, month - 1, day));
+  if (utc.getUTCFullYear() !== year || utc.getUTCMonth() !== month - 1 || utc.getUTCDate() !== day) {
+    return { error: `${label} no es una fecha válida` };
+  }
+  return { value: text };
+}
+
+function eventDatePatch(body, current) {
+  const hasStart = 'starts_on' in body;
+  const hasEnd = 'ends_on' in body;
+  if (!hasStart && !hasEnd) return { patch: {} };
+
+  const start = parseDateOnly(hasStart ? body.starts_on : current?.starts_on, 'La fecha de inicio del evento');
+  const end = parseDateOnly(hasEnd ? body.ends_on : current?.ends_on, 'La fecha de fin del evento');
+  if (start.error) return { error: start.error };
+  if (end.error) return { error: end.error };
+  if (!start.value || !end.value) {
+    return { error: 'Indica la fecha de inicio y la de fin del evento' };
+  }
+  if (start.value > end.value) {
+    return { error: 'La fecha de fin del evento tiene que ser igual o posterior a la de inicio' };
+  }
+  return { patch: { starts_on: start.value, ends_on: end.value } };
 }
 
 async function presentEvent(event, { counts = false } = {}) {
@@ -108,7 +147,7 @@ exports.getEventById = async (req, res) => {
 
 exports.createEvent = async (req, res) => {
   try {
-    const { nombre, mes, anio, inscription_starts_at, inscription_ends_at } = req.body;
+    const { nombre, mes, anio, inscription_starts_at, inscription_ends_at, starts_on, ends_on } = req.body;
 
     if (!nombre || !mes || !anio) {
       return res.status(400).json({ message: 'Nombre, mes y año son obligatorios' });
@@ -128,7 +167,10 @@ exports.createEvent = async (req, res) => {
       return res.status(400).json({ message: 'La fecha de fin tiene que ser posterior a la de inicio' });
     }
 
-    const row = { nombre, mes, anio };
+    const eventDates = eventDatePatch({ starts_on: starts_on ?? null, ends_on: ends_on ?? null });
+    if (eventDates.error) return res.status(400).json({ message: eventDates.error });
+
+    const row = { nombre, mes, anio, ...eventDates.patch };
     if (startsAt) row.inscription_starts_at = startsAt;
     if (endsAt) row.inscription_ends_at = endsAt;
 
@@ -174,7 +216,7 @@ exports.updateEventSettings = async (req, res) => {
       patch.hidden = req.body.hidden;
     }
 
-    for (const field of ['en_pruebas', 'inscription_en_pruebas', 'food_en_pruebas', 'games_en_pruebas', 'snacks_en_pruebas']) {
+    for (const field of ['en_pruebas', 'inscription_en_pruebas', 'food_en_pruebas', 'games_en_pruebas', 'snacks_en_pruebas', 'manual_food_en_pruebas']) {
       if (field in req.body) {
         if (typeof req.body[field] !== 'boolean') {
           return res.status(400).json({ message: 'En pruebas tiene que ser sí o no' });
@@ -195,6 +237,10 @@ exports.updateEventSettings = async (req, res) => {
         patch.max_inscriptions = max;
       }
     }
+
+    const eventDates = eventDatePatch(req.body, current);
+    if (eventDates.error) return res.status(400).json({ message: eventDates.error });
+    Object.assign(patch, eventDates.patch);
 
     const touchesDates = 'inscription_starts_at' in req.body || 'inscription_ends_at' in req.body;
     if (touchesDates) {

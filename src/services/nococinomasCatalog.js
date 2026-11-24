@@ -23,7 +23,8 @@ async function fetchHtml(url) {
 }
 
 function parseProducts(html, category) {
-  const chunks = html.split(/data-id-product="/).slice(1);
+  const marker = html.includes('data-ncm-dish="') ? 'data-ncm-dish="' : 'data-id-product="';
+  const chunks = html.split(marker).slice(1);
   const products = [];
 
   for (const chunk of chunks) {
@@ -31,22 +32,29 @@ function parseProducts(html, category) {
     if (!idMatch) continue;
 
     const urlMatch = chunk.match(/href="([^"]+)"/);
-    const nameMatch = chunk.match(/alt="([^"]+)"/) || chunk.match(/title="([^"]+)"/);
+    const nameMatch = chunk.match(/<h3[^>]*>\s*<a[^>]*>([^<]+)<\/a>/i)
+      || chunk.match(/alt="([^"]+)"/)
+      || chunk.match(/title="([^"]+)"/);
+    const priceAttr = chunk.match(/data-price="([\d.]+)"/);
     const priceMatch = chunk.match(/([\d]+[.,]\d{2})\s*€/);
     const imgMatch = chunk.match(/src="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i);
 
     if (!urlMatch || !nameMatch) continue;
 
-    let externalUrl = urlMatch[1];
+    let externalUrl = urlMatch[1].replace(/&amp;/g, '&');
     if (externalUrl.startsWith('/')) {
       externalUrl = `${BASE_URL}${externalUrl}`;
     }
+
+    const price = priceAttr
+      ? parseFloat(priceAttr[1])
+      : (priceMatch ? parseFloat(priceMatch[1].replace(',', '.')) : null);
 
     products.push({
       external_id: idMatch[1],
       external_url: externalUrl.split('?')[0],
       name: nameMatch[1].trim(),
-      price: priceMatch ? parseFloat(priceMatch[1].replace(',', '.')) : null,
+      price: Number.isFinite(price) ? price : null,
       image_url: imgMatch
         ? (imgMatch[1].startsWith('http') ? imgMatch[1] : `${BASE_URL}${imgMatch[1]}`)
         : null,
@@ -81,6 +89,7 @@ function extractIdFromUrl(url) {
 
 function extractIdFromHtml(html) {
   const patterns = [
+    /data-ncm-dish="(\d+)"/i,
     /name="id_product"\s+value="(\d+)"/i,
     /data-id-product="(\d+)"/i,
     /id_product["']?\s*[:=]\s*["']?(\d+)/i,
@@ -155,7 +164,10 @@ async function discoverCategoryUrls() {
     [...homeHtml.matchAll(/href="(https:\/\/www\.nococinomas\.es\/\d+-[^"]+)"/g)].map((m) => m[1]),
   )];
 
-  return urls.filter((url) => !url.includes('/content/') && !url.includes('/module/'));
+  return urls.filter((url) => !url.includes('/content/')
+    && !url.includes('/module/')
+    && !/\.html(?:$|\?)/i.test(url)
+    && !url.includes('/inicio/'));
 }
 
 /**
