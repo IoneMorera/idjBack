@@ -393,7 +393,7 @@ exports.sendTemplate = async (req, res) => {
         sent += 1;
       } catch (sendError) {
         console.error(`Error al enviar el correo a ${user.email}:`, sendError);
-        failed.push({ user_id: user.id, email: user.email, message: 'No se pudo enviar' });
+        failed.push({ user_id: user.id, email: user.email, message: sendError?.message || 'No se pudo enviar' });
       }
     }
 
@@ -401,7 +401,12 @@ exports.sendTemplate = async (req, res) => {
     for (const id of missing) failed.push({ user_id: id, message: 'Usuario no encontrado' });
 
     if (sent === 0) {
-      return res.status(502).json({ message: 'No se pudo enviar el correo', sent, failed });
+      const reason = failed.find((item) => item.email)?.message || failed[0]?.message;
+      return res.status(502).json({
+        message: reason ? `No se pudo enviar el correo: ${reason}` : 'No se pudo enviar el correo',
+        sent,
+        failed,
+      });
     }
     res.json({
       message: failed.length ? `Enviado a ${sent} usuarios. ${failed.length} no se pudieron enviar.` : `Correo enviado a ${sent} usuarios`,
