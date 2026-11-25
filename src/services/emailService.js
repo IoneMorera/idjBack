@@ -10,6 +10,7 @@ const {
   getEmailTemplate,
   loadEmails,
 } = require('../utils/emailTemplate');
+const { recordEmailFailure } = require('./emailFailures');
 
 function smtpAuth() {
   return {
@@ -307,7 +308,16 @@ async function sendInscriptionEmailToUser(inscription) {
 
 async function sendEmailsForTransition(eventId, fromState, toState, inscription) {
   if (!eventId || !fromState || !toState || fromState === toState) return { sent: 0, failed: 0 };
-  const emails = await loadEmails(eventId);
+  const source = fromState === 'Sin inscribir'
+    ? `Inscripción nueva (${toState})`
+    : `Cambio de estado: ${fromState} → ${toState}`;
+  let emails;
+  try {
+    emails = await loadEmails(eventId);
+  } catch (error) {
+    await recordEmailFailure({ eventId, source, recipient: inscription.email, error });
+    throw error;
+  }
   const matches = emails.filter((email) => (
     email.trigger_enabled
     && email.from_state === fromState
@@ -318,9 +328,20 @@ async function sendEmailsForTransition(eventId, fromState, toState, inscription)
   const results = await Promise.allSettled(
     matches.map((template) => sendStoredTemplate(template, inscription)),
   );
-  const failures = results.filter((result) => result.status === 'rejected');
-  for (const failure of failures) {
-    console.error('Error al enviar correo por cambio de estado:', failure.reason);
+  const values = buildShortcodeValues(inscription);
+  const failures = [];
+  for (const [index, result] of results.entries()) {
+    if (result.status !== 'rejected') continue;
+    failures.push(result);
+    console.error('Error al enviar correo por cambio de estado:', result.reason);
+    await recordEmailFailure({
+      eventId,
+      source,
+      emailName: matches[index].name,
+      recipient: inscription.email,
+      subject: applyShortcodes(matches[index].subject, values),
+      error: result.reason,
+    });
   }
   if (failures.length === matches.length) throw failures[0].reason;
   return { sent: matches.length - failures.length, failed: failures.length };
@@ -406,11 +427,24 @@ async function sendInscriptionEmailToAdmin(inscription) {
   } catch (error) {
     console.error('No se pudo cargar la cabecera del correo:', error.message);
   }
-  await sendMail({
-    to: smtpAuth().user,
-    subject: `Nueva inscripción - ${inscription.nombre} ${inscription.apellidos} - ${inscription.eventName}`,
-    html: renderAdminInscriptionEmail({ ...inscription, title, logoUrl }),
-  });
+  const to = smtpAuth().user;
+  const subject = `Nueva inscripción - ${inscription.nombre} ${inscription.apellidos} - ${inscription.eventName}`;
+  try {
+    await sendMail({
+      to,
+      subject,
+      html: renderAdminInscriptionEmail({ ...inscription, title, logoUrl }),
+    });
+  } catch (error) {
+    await recordEmailFailure({
+      eventId: inscription.eventId,
+      source: 'Aviso de inscripción al administrador',
+      recipient: to,
+      subject,
+      error,
+    });
+    throw error;
+  }
 }
 
 function renderRegistrationEmail({ username, nombre, apellidos, email, telefono, password, logoUrl }) {
@@ -444,11 +478,22 @@ async function sendRegistrationEmail(user) {
   } catch (error) {
     console.error('No se pudo cargar el logo del correo de registro:', error.message);
   }
-  await sendMail({
-    to: user.email,
-    subject: 'Confirmación de registro - Ludo VyP',
-    html: renderRegistrationEmail({ ...user, logoUrl }),
-  });
+  const subject = 'Confirmación de registro - Ludo VyP';
+  try {
+    await sendMail({
+      to: user.email,
+      subject,
+      html: renderRegistrationEmail({ ...user, logoUrl }),
+    });
+  } catch (error) {
+    await recordEmailFailure({
+      source: 'Confirmación de registro',
+      recipient: user.email,
+      subject,
+      error,
+    });
+    throw error;
+  }
 }
 
 async function sendInscriptionEmails(inscriptionData) {
