@@ -44,10 +44,10 @@ async function assertGamesAccess(user, eventId, { write = false } = {}) {
     throw httpError('Evento no encontrado', 404);
   }
   const inscription = await getUserInscription(user.id, eventId);
-  if (write && !preview && !isInscrito(inscription)) {
+  if (write && !preview && !isInscrito(inscription, event)) {
     throw httpError('Debes estar inscrito con estado Inscrito para gestionar juegos', 403);
   }
-  if (!write && !staff && !preview && !isInscrito(inscription)) {
+  if (!write && !staff && !preview && !isInscrito(inscription, event)) {
     throw httpError('Debes estar inscrito con estado Inscrito para ver los juegos', 403);
   }
   return event;
