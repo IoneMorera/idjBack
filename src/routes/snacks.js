@@ -9,6 +9,8 @@ router.post('/options', authMiddleware, adminMiddleware, snackController.createO
 router.put('/options/:optionId', authMiddleware, adminMiddleware, snackController.updateOption);
 router.delete('/options/:optionId', authMiddleware, adminMiddleware, snackController.deleteOption);
 router.get('/summary', authMiddleware, adminMiddleware, snackController.getAdminSummary);
+router.put('/payments', authMiddleware, adminMiddleware, snackController.setPayment);
+router.put('/payments/confirm', authMiddleware, adminMiddleware, snackController.confirmPayment);
 router.get('/mine', authMiddleware, snackController.getMine);
 router.put('/mine', authMiddleware, snackController.saveMine);
 router.post('/requests', authMiddleware, snackController.addRequest);
