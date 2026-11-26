@@ -2,6 +2,13 @@ const supabase = require('../database');
 const { getEventById, getUserInscription, isInscrito } = require('../utils/foodAccess');
 const { isStaff, developerPreview } = require('../utils/access');
 const { schemaErrorMessage } = require('../utils/schema');
+const {
+  fetchExtraPayments,
+  getExtraPayment,
+  markChangedAfterPayment,
+  setExtraPaymentHandler,
+  confirmExtraPaymentHandler,
+} = require('../utils/extraFoodPayments');
 
 function httpError(message, status) {
   const error = new Error(message);
@@ -224,9 +231,11 @@ exports.getAdminSummary = async (req, res) => {
       throw ordersResult.error;
     }
     if (requestsResult.error) throw requestsResult.error;
+    const payments = await fetchExtraPayments(event.id, 'manual_food');
 
     res.json({
       manual_food_enabled: event.manual_food_enabled === true,
+      ...payments,
       options: optionsResult.data || [],
       orders: orderRows.map((row) => ({
         id: row.id,
@@ -247,6 +256,9 @@ exports.getAdminSummary = async (req, res) => {
     res.status(500).json({ message: manualFoodError(error, 'Error interno del servidor') });
   }
 };
+
+exports.setPayment = setExtraPaymentHandler('manual_food');
+exports.confirmPayment = confirmExtraPaymentHandler('manual_food');
 
 exports.getMine = async (req, res) => {
   try {
@@ -284,8 +296,10 @@ exports.getMine = async (req, res) => {
     }
     if (requestsResult.error) throw requestsResult.error;
     if (communityResult.error) throw communityResult.error;
+    const payment = await getExtraPayment(event.id, req.user.id, 'manual_food');
     res.json({
       closed: event.manual_food_closed === true,
+      ...payment,
       options: optionsResult.data || [],
       selected_ids: orderRows.map((row) => row.option_id),
       items: orderRows.map((row) => ({
@@ -348,6 +362,28 @@ exports.saveMine = async (req, res) => {
       }
     }
 
+    const payment = await getExtraPayment(event.id, req.user.id, 'manual_food');
+    let changedAfterPayment = payment.changed_after_payment;
+    if (payment.paid && !changedAfterPayment) {
+      let { data: current, error: currentError } = await supabase
+        .from('event_manual_food_orders')
+        .select('option_id, cantidad')
+        .eq('event_id', event.id)
+        .eq('user_id', req.user.id);
+      if (currentError && missingCantidad(currentError)) {
+        ({ data: current, error: currentError } = await supabase
+          .from('event_manual_food_orders')
+          .select('option_id')
+          .eq('event_id', event.id)
+          .eq('user_id', req.user.id));
+      }
+      if (currentError) throw currentError;
+      const next = new Map(items.map((item) => [item.optionId, item.cantidad]));
+      const rows = current || [];
+      changedAfterPayment = rows.length !== next.size
+        || rows.some((row) => next.get(row.option_id) !== (Number(row.cantidad) || 1));
+    }
+
     const { error: deleteError } = await supabase
       .from('event_manual_food_orders')
       .delete()
@@ -367,8 +403,14 @@ exports.saveMine = async (req, res) => {
       if (error) throw error;
     }
 
+    if (changedAfterPayment && !payment.changed_after_payment) {
+      await markChangedAfterPayment(event.id, req.user.id, 'manual_food');
+    }
+
     res.json({
       message: 'Comidas guardadas',
+      paid: payment.paid,
+      changed_after_payment: changedAfterPayment,
       selected_ids: items.map((item) => item.optionId),
       items: items.map((item) => ({ option_id: item.optionId, cantidad: item.cantidad })),
     });
