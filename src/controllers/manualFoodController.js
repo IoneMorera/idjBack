@@ -47,7 +47,7 @@ async function assertManualFoodUser(user, eventId) {
   if (event.manual_food_en_pruebas && !isStaff(user)) throw httpError('Las comidas manuales están en pruebas', 403);
   if (!preview) {
     const inscription = await getUserInscription(user.id, eventId);
-    if (!isInscrito(inscription)) {
+    if (!isInscrito(inscription, event)) {
       throw httpError('Debes estar inscrito con estado Inscrito para pedir estas comidas', 403);
     }
   }
