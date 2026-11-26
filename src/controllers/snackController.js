@@ -2,6 +2,13 @@ const supabase = require('../database');
 const { getEventById, getUserInscription, isInscrito } = require('../utils/foodAccess');
 const { isStaff, developerPreview } = require('../utils/access');
 const { schemaErrorMessage: sharedSchemaError } = require('../utils/schema');
+const {
+  fetchExtraPayments,
+  getExtraPayment,
+  markChangedAfterPayment,
+  setExtraPaymentHandler,
+  confirmExtraPaymentHandler,
+} = require('../utils/extraFoodPayments');
 
 const OPTION_COLUMNS = 'id, nombre, coste_adicional, sort_order, tipo';
 
@@ -195,9 +202,11 @@ exports.getAdminSummary = async (req, res) => {
     if (optionsResult.error) throw optionsResult.error;
     if (ordersResult.error) throw ordersResult.error;
     if (requestsResult.error) throw requestsResult.error;
+    const payments = await fetchExtraPayments(event.id, 'snacks');
 
     res.json({
       snacks_enabled: event.snacks_enabled === true,
+      ...payments,
       options: optionsResult.data || [],
       orders: (ordersResult.data || []).map((row) => ({
         id: row.id,
@@ -217,6 +226,9 @@ exports.getAdminSummary = async (req, res) => {
     res.status(500).json({ message: schemaErrorMessage(error, 'Error interno del servidor') });
   }
 };
+
+exports.setPayment = setExtraPaymentHandler('snacks');
+exports.confirmPayment = confirmExtraPaymentHandler('snacks');
 
 exports.getMine = async (req, res) => {
   try {
@@ -244,7 +256,9 @@ exports.getMine = async (req, res) => {
     if (ordersResult.error) throw ordersResult.error;
     if (requestsResult.error) throw requestsResult.error;
     if (communityResult.error) throw communityResult.error;
+    const payment = await getExtraPayment(event.id, req.user.id, 'snacks');
     res.json({
+      ...payment,
       options: optionsResult.data || [],
       selected_ids: (ordersResult.data || []).map((row) => row.option_id),
       requests: requestsResult.data || [],
@@ -280,6 +294,19 @@ exports.saveMine = async (req, res) => {
       }
     }
 
+    const payment = await getExtraPayment(event.id, req.user.id, 'snacks');
+    let changedAfterPayment = payment.changed_after_payment;
+    if (payment.paid && !changedAfterPayment) {
+      const { data: current, error: currentError } = await supabase
+        .from('event_snack_orders')
+        .select('option_id')
+        .eq('event_id', event.id)
+        .eq('user_id', req.user.id);
+      if (currentError) throw currentError;
+      const currentIds = new Set((current || []).map((row) => row.option_id));
+      changedAfterPayment = currentIds.size !== optionIds.length || optionIds.some((id) => !currentIds.has(id));
+    }
+
     const { error: deleteError } = await supabase
       .from('event_snack_orders')
       .delete()
@@ -294,7 +321,16 @@ exports.saveMine = async (req, res) => {
       if (error) throw error;
     }
 
-    res.json({ message: 'Picoteo guardado', selected_ids: optionIds });
+    if (changedAfterPayment && !payment.changed_after_payment) {
+      await markChangedAfterPayment(event.id, req.user.id, 'snacks');
+    }
+
+    res.json({
+      message: 'Picoteo guardado',
+      selected_ids: optionIds,
+      paid: payment.paid,
+      changed_after_payment: changedAfterPayment,
+    });
   } catch (error) {
     const status = error.status || 500;
     if (status >= 500) console.error('Error al guardar picoteo:', error);

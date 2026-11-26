@@ -10,6 +10,8 @@ router.post('/options', authMiddleware, adminMiddleware, manualFoodController.cr
 router.put('/options/:optionId', authMiddleware, adminMiddleware, manualFoodController.updateOption);
 router.delete('/options/:optionId', authMiddleware, adminMiddleware, manualFoodController.deleteOption);
 router.get('/summary', authMiddleware, adminMiddleware, manualFoodController.getAdminSummary);
+router.put('/payments', authMiddleware, adminMiddleware, manualFoodController.setPayment);
+router.put('/payments/confirm', authMiddleware, adminMiddleware, manualFoodController.confirmPayment);
 router.get('/mine', authMiddleware, manualFoodController.getMine);
 router.put('/mine', authMiddleware, manualFoodController.saveMine);
 
