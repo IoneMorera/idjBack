@@ -47,7 +47,7 @@ async function assertSnackUser(user, eventId) {
   if (event.snacks_en_pruebas && !isStaff(user)) throw httpError('El picoteo está en pruebas', 403);
   if (!preview) {
     const inscription = await getUserInscription(user.id, eventId);
-    if (!isInscrito(inscription)) {
+    if (!isInscrito(inscription, event)) {
       throw httpError('Debes estar inscrito con estado Inscrito para pedir picoteo', 403);
     }
   }

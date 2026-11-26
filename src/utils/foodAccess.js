@@ -32,8 +32,15 @@ async function getUserInscription(userId, eventId) {
   };
 }
 
-function isInscrito(inscription) {
-  return inscription?.estado_nombre === 'Inscrito';
+function isSingleDayEvent(event) {
+  if (!event?.starts_on || !event?.ends_on) return false;
+  return String(event.starts_on).slice(0, 10) === String(event.ends_on).slice(0, 10);
+}
+
+function isInscrito(inscription, event) {
+  const estado = inscription?.estado_nombre;
+  if (estado === 'Inscrito') return true;
+  return estado === 'Confirmado - Pdte de Pago' && isSingleDayEvent(event);
 }
 
 async function assertFoodOrderingEnabled(eventId, user) {
@@ -65,7 +72,7 @@ async function assertUserCanOrderFood(user, eventId) {
   const event = await assertFoodOrderingEnabled(eventId, user);
   if (developerPreview(user, event.food_en_pruebas)) return null;
   const inscription = await getUserInscription(user.id, eventId);
-  if (!isInscrito(inscription)) {
+  if (!isInscrito(inscription, event)) {
     const err = new Error('Debes estar inscrito con estado Inscrito para pedir comida');
     err.status = 403;
     throw err;
@@ -92,6 +99,7 @@ module.exports = {
   getEventById,
   getUserInscription,
   isInscrito,
+  isSingleDayEvent,
   assertFoodOrderingEnabled,
   assertUserCanOrderFood,
   validateDayMeal,
